@@ -9,8 +9,8 @@ from pynput import keyboard, mouse
 mouseController = mouse.Controller()
 
 # Set the interval (in seconds) between clicks
-click_interval = 0.8
-click_interval_variation = 0.1
+click_interval = 1.5
+click_interval_variation = 0.05
 
 # Flag to control the clicking
 clicking = False
@@ -32,11 +32,11 @@ def on_press(key):
     global clicking
     try:
         if hasattr(key, 'char'):
-            if key.char in ['s', 'S']:
-                clicking = True
+            if key.char in ['s', 'S'] and not clicking:
                 print("Starting Clicking!")
+                clicking = True
                 threading.Thread(target=start_clicking).start()
-            elif key.char in ['e', 'E']:
+            elif key.char in ['e', 'E'] and clicking:
                 clicking = False
                 print("Clicking stopped!")
     except AttributeError:
