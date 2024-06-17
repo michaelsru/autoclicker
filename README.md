@@ -1,4 +1,5 @@
 ***AutoClicker***
+
 **Description**
 AutoClicker is a Python script that allows users to automate mouse clicks based on keyboard input.
 
