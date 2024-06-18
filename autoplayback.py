@@ -4,6 +4,7 @@ import time
 import threading
 import random
 import argparse
+import re
 from pynput import keyboard, mouse
 
 parser = argparse.ArgumentParser()
@@ -91,7 +92,7 @@ def play_back_mouse_activity():
 
 # Function to handle key presses
 def on_press(key):
-    global recording, playing_back, playback_thread, count
+    global recording, playing_back, playback_thread, count, mouse_events
 
     try:
         if hasattr(key, 'char'):
@@ -102,6 +103,30 @@ def on_press(key):
             elif key.char in ['s', 'S'] and recording:
                 recording = False
                 print("Recording stopped!")
+            # save recording to file
+            elif key.char in ['w', 'W']:
+                print("Saving recording to mouse_events.txt...")
+                with open('mouse_events.txt', 'w') as f:
+                    for event in mouse_events:
+                        f.write(f"{event[0]}|{event[1]}|{event[2]}\n")
+                print("Recording saved to mouse_events.txt!")
+            # load recording from file
+            elif key.char in ['l', 'L']:
+                with open('mouse_events.txt', 'r') as f:
+                    mouse_events = []
+                    for line in f:
+                        event_type, event_data, offset_time = line.strip().split('|')
+                        if event_type == 'move':
+                            position = tuple(map(float, re.findall(r"[-+]?\d*\.\d+|\d+", event_data)))
+                            event_data = position
+                        elif event_type == 'click':
+                            x, y, button, pressed = re.match(r"\(([-+]?\d*\.\d+|\d+), ([-+]?\d*\.\d+|\d+), <Button\.(\w+): .+>, (True|False)\)", event_data).groups()
+                            x, y = float(x), float(y)
+                            button = getattr(mouse.Button, button)
+                            pressed = pressed == 'True'
+                            event_data = (x, y, button, pressed)
+                        mouse_events.append((event_type, event_data, float(offset_time)))
+                print("Recording loaded from mouse_events.txt!")
             elif key.char in ['p', 'P'] and not playing_back and not recording:
                 print("Starting Playback!")
                 playing_back = True
