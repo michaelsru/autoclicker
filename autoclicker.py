@@ -19,13 +19,13 @@ running = True
 # Function to start clicking
 def start_clicking():
     while clicking:
-            # Press and release the left mouse button
-            mouseController.press(mouse.Button.left)
-            mouseController.release(mouse.Button.left)
-            print("Click!")
-            actual_interval = click_interval + (click_interval_variation * (2 * random.random() - 1))
-            print(actual_interval)
-            time.sleep(actual_interval)
+        # Press and release the left mouse button
+        mouseController.press(mouse.Button.left)
+        mouseController.release(mouse.Button.left)
+        print("Click!")
+        actual_interval = click_interval + (click_interval_variation * (2 * random.random() - 1))
+        print(actual_interval)
+        time.sleep(actual_interval)
 
 # Function to handle key presses
 def on_press(key):
