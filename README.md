@@ -13,9 +13,16 @@ AutoClicker is a Python script that allows users to automate mouse clicks based 
 ## Usage
 
 To use the AutoClicker script, follow these steps:
-1. Run the script: `python autoclicker.py`
 2. Press 's' to start auto-clicking.
 3. Press 'e' to stop auto-clicking.
+
+To use the AutoPlayback script, follow these steps:
+1. Press 'r' to start recording mouse movement.
+2. Press 's' to stop recording.
+3. Press 'p' to playback recording.
+4. Press 'e' to end playback.
+5. Press 'w' to write recording to file.
+6. Press 'l' to load a saved file.
 
 ## License
 
