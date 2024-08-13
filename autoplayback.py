@@ -10,10 +10,16 @@ from pynput import keyboard, mouse
 parser = argparse.ArgumentParser()
 parser.add_argument('-g', '--granularity', type=float, default=0.01, help='Granularity between mouse events in seconds')
 parser.add_argument('-c', '--count', type=int, default=-1, help='Number of loops to playback')
+# add delay threshold
+parser.add_argument('-d', '--delay_threshold', type=float, default=0.05, help='Delay threshold in seconds')
+# add position threshold
+parser.add_argument('-p', '--position_threshold', type=float, default=0.003, help='Position threshold in percentage')
 args = parser.parse_args()
 
 granularity = args.granularity
 count = args.count
+delay_threshold = args.delay_threshold
+position_threshold = args.position_threshold
 
 # Create instances of the mouse and keyboard controllers
 mouseController = mouse.Controller()
@@ -71,7 +77,7 @@ def on_scroll(x, y, dx, dy):
 
 # Function to play back mouse activity
 def play_back_mouse_activity():
-    global playing_back, count, mouse_events
+    global playing_back, count, mouse_events, delay_threshold, position_threshold
     print(f'mouse events: {mouse_events}')
     while playing_back:
         if count != -1:
@@ -86,7 +92,9 @@ def play_back_mouse_activity():
             print(f"Playing back mouse activity: {event_type}, {event_data}, delay: {delay}")
             if event_type == 'move':
                 position = event_data
-                mouseController.position = position
+                rand_position_scaler = random.uniform(-position_threshold, position_threshold)
+                modified_position = (position[0] * (1 + rand_position_scaler), position[1] * (1 + rand_position_scaler))
+                mouseController.position = modified_position
                 print(f"Moving mouse to {position}")
             elif event_type == 'click':
                 x, y, button, pressed = event_data
@@ -106,6 +114,9 @@ def play_back_mouse_activity():
                 else:
                     print("Releasing spacebar")
                     keyboardController.release(keyboard.Key.space)
+            rand_delay_scaler = random.uniform(-delay_threshold, delay_threshold)
+            print(f"Random delay scaler: {rand_delay_scaler}")
+            delay *= (1 + rand_delay_scaler)
             time.sleep(delay)
 
 # Function to handle key presses
