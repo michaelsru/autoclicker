@@ -83,7 +83,7 @@ def load_events_from_file(filename):
         with open(filename, 'r') as f:
             for line in f.readlines():
                 line = line.strip()
-                if not line:
+                if not line or line.startswith('#'):
                     continue
                 
                 # Check if it's a command line
