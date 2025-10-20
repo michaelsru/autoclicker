@@ -75,6 +75,65 @@ def on_scroll(x, y, dx, dy):
             mouse_events.append(('scroll', (x, y, dx, dy), differential_seconds))
         last_event_time = current_time
 
+# Function to parse and load events from a file
+def load_events_from_file(filename):
+    """Load mouse events from a text file, supporting both direct events and command syntax"""
+    events = []
+    try:
+        with open(filename, 'r') as f:
+            for line in f.readlines():
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check if it's a command line
+                if line.startswith('run '):
+                    # Load events from another file
+                    target_file = line[4:].strip()
+                    print(f"Loading events from file: {target_file}")
+                    events.extend(load_events_from_file(target_file))
+                elif line.startswith('loop '):
+                    # Parse loop command: loop <count> <filename>
+                    parts = line[5:].strip().split(' ', 1)
+                    if len(parts) == 2:
+                        loop_count = int(parts[0])
+                        target_file = parts[1].strip()
+                        print(f"Looping {loop_count} times: {target_file}")
+                        loop_events = load_events_from_file(target_file)
+                        for _ in range(loop_count):
+                            events.extend(loop_events)
+                else:
+                    # Parse regular event line
+                    try:
+                        event_type, event_data, delay = line.split('|')
+                        if event_type == 'move':
+                            position = tuple(map(float, re.findall(r'([-+]?\d*\.?\d+)', event_data)))
+                            event_data = position
+                        elif event_type == 'click':
+                            match = re.match(r"\(([-+]?\d*\.\d+|\d+), ([-+]?\d*\.\d+|\d+), <Button\.(\w+): .+>, (True|False)\)", event_data)
+                            if match:
+                                x, y, button, pressed = match.groups()
+                                x, y = float(x), float(y)
+                                button = getattr(mouse.Button, button)
+                                pressed = pressed == 'True'
+                                event_data = (x, y, button, pressed)
+                        elif event_type == 'scroll':
+                            x, y, dx, dy = map(float, re.findall(r'([-+]?\d*\.?\d+)', event_data))
+                            event_data = (x, y, dx, dy)
+                        elif event_type == 'spacebar':
+                            event_data = event_data == 'True'
+                        
+                        events.append((event_type, event_data, float(delay)))
+                    except Exception as e:
+                        print(f"Error parsing line: {line} - {e}")
+                        continue
+    except FileNotFoundError:
+        print(f"File not found: {filename}")
+    except Exception as e:
+        print(f"Error loading file {filename}: {e}")
+    
+    return events
+
 # Function to play back mouse activity
 def play_back_mouse_activity():
     global playing_back, count, mouse_events, delay_threshold, position_threshold
@@ -148,30 +207,10 @@ def on_press(key):
                 print("Recording saved to mouse_events.txt!")
             # load recording from file
             elif key.char in ['l', 'L']:
-                with open('mouse_events.txt', 'r') as f:
-                    mouse_events = []
-                    total_time = 0
-                    for line in f.readlines():
-                        print(f'line: {line}')
-                        event_type, event_data, delay = line.strip().split('|')
-                        if event_type == 'move':
-                            position = tuple(map(float, re.findall(r'([-+]?\d*\.?\d+)', event_data)))
-                            event_data = position
-                        elif event_type == 'click':
-                            x, y, button, pressed = re.match(r"\(([-+]?\d*\.\d+|\d+), ([-+]?\d*\.\d+|\d+), <Button\.(\w+): .+>, (True|False)\)", event_data).groups()
-                            x, y = float(x), float(y)
-                            button = getattr(mouse.Button, button)
-                            pressed = pressed == 'True'
-                            event_data = (x, y, button, pressed)
-                        elif event_type == 'scroll':
-                            x, y, dx, dy = map(float, re.findall(r'([-+]?\d*\.?\d+)', event_data))
-                            event_data = (x, y, dx, dy)
-                        elif event_type == 'spacebar':
-                            event_data = event_data == 'True'
-                        with mouse_events_lock:
-                            mouse_events.append((event_type, event_data, float(delay)))
-                        print(f"Loading mouse event: {event_type}, {event_data}, delay: {delay}")
-                        total_time += float(delay)
+                print("Loading recording from mouse_events.txt...")
+                with mouse_events_lock:
+                    mouse_events = load_events_from_file('mouse_events.txt')
+                total_time = sum(event[2] for event in mouse_events)
                 print("Recording loaded from mouse_events.txt!")
                 print(f"Total recording time: {total_time} seconds")
             elif key.char in ['p', 'P'] and not playing_back and not recording:
