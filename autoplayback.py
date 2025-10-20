@@ -13,7 +13,7 @@ parser.add_argument('-c', '--count', type=int, default=-1, help='Number of loops
 # add delay threshold
 parser.add_argument('-d', '--delay_threshold', type=float, default=0.05, help='Delay threshold in seconds')
 # add position threshold
-parser.add_argument('-p', '--position_threshold', type=float, default=0.003, help='Position threshold in percentage')
+parser.add_argument('-p', '--position_threshold', type=float, default=0.0015, help='Position threshold in percentage')
 args = parser.parse_args()
 
 granularity = args.granularity
