@@ -31,6 +31,7 @@ playing_back = False
 running = True
 mouse_events = []
 playback_thread = None
+recording_thread = None
 mouse_events_lock = threading.Lock()
 start_time = 0
 
@@ -76,8 +77,17 @@ def on_scroll(x, y, dx, dy):
         last_event_time = current_time
 
 # Function to parse and load events from a file
-def load_events_from_file(filename):
+def load_events_from_file(filename, loaded_files=None):
     """Load mouse events from a text file, supporting both direct events and command syntax"""
+    if loaded_files is None:
+        loaded_files = set()
+    
+    # Prevent infinite recursion
+    if filename in loaded_files:
+        print(f"Warning: Circular reference detected for file: {filename}")
+        return []
+    
+    loaded_files.add(filename)
     events = []
     try:
         with open(filename, 'r') as f:
@@ -91,7 +101,7 @@ def load_events_from_file(filename):
                     # Load events from another file
                     target_file = line[4:].strip()
                     print(f"Loading events from file: {target_file}")
-                    events.extend(load_events_from_file(target_file))
+                    events.extend(load_events_from_file(target_file, loaded_files.copy()))
                 elif line.startswith('loop '):
                     # Parse loop command: loop <count> <filename>
                     parts = line[5:].strip().split(' ', 1)
@@ -99,7 +109,7 @@ def load_events_from_file(filename):
                         loop_count = int(parts[0])
                         target_file = parts[1].strip()
                         print(f"Looping {loop_count} times: {target_file}")
-                        loop_events = load_events_from_file(target_file)
+                        loop_events = load_events_from_file(target_file, loaded_files.copy())
                         for _ in range(loop_count):
                             events.extend(loop_events)
                 else:
@@ -133,6 +143,14 @@ def load_events_from_file(filename):
         print(f"Error loading file {filename}: {e}")
     
     return events
+
+# Function to clear mouse events from memory
+def clear_mouse_events():
+    """Clear the mouse_events list to free memory"""
+    global mouse_events
+    with mouse_events_lock:
+        mouse_events.clear()
+    print("Mouse events cleared from memory!")
 
 # Function to play back mouse activity
 def play_back_mouse_activity():
@@ -180,7 +198,7 @@ def play_back_mouse_activity():
 
 # Function to handle key presses
 def on_press(key):
-    global recording, playing_back, playback_thread, count, mouse_events, last_event_time
+    global recording, playing_back, playback_thread, recording_thread, count, mouse_events, last_event_time
 
     try:
         if key == keyboard.Key.space and recording:
@@ -194,9 +212,12 @@ def on_press(key):
             if key.char in ['r', 'R'] and not recording and not playing_back:
                 print("Starting Recording!")
                 recording = True
-                threading.Thread(target=record_mouse_activity).start()
+                recording_thread = threading.Thread(target=record_mouse_activity)
+                recording_thread.start()
             elif key.char in ['s', 'S'] and recording:
                 recording = False
+                if recording_thread:
+                    recording_thread.join()
                 print("Recording stopped!")
             # save recording to file
             elif key.char in ['w', 'W']:
@@ -224,12 +245,15 @@ def on_press(key):
                 if playback_thread:
                     playback_thread.join()
                 print("Playback stopped!")
+            # clear memory
+            elif key.char in ['c', 'C']:
+                clear_mouse_events()
     except AttributeError:
         pass
 
 # Function to handle key releases (to exit the program)
 def on_release(key):
-    global running, recording, playing_back, last_event_time
+    global running, recording, playing_back, recording_thread, playback_thread, last_event_time
 
     if key == keyboard.Key.space and recording:
         current_time = time.time()
@@ -239,10 +263,21 @@ def on_release(key):
             mouse_events.append(('spacebar', False, differential_seconds))
         last_event_time = current_time
     elif key == keyboard.Key.esc:
-        # Stop listener
+        # Stop listener and cleanup
         running = False
         recording = False
         playing_back = False
+        
+        # Clean up threads
+        if recording_thread and recording_thread.is_alive():
+            recording_thread.join()
+        if playback_thread and playback_thread.is_alive():
+            playback_thread.join()
+        
+        # Stop listeners
+        mouseListener.stop()
+        keyboardListener.stop()
+        
         return False
 
 # Create a mouse listener
