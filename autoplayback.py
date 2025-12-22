@@ -14,6 +14,7 @@ parser.add_argument('-c', '--count', type=int, default=1, help='Number of loops 
 parser.add_argument('-d', '--delay_threshold', type=float, default=0.05, help='Delay threshold in seconds')
 # add position threshold
 parser.add_argument('-p', '--position_threshold', type=float, default=0.0015, help='Position threshold in percentage')
+parser.add_argument('-f', '--file', type=str, default='mouse_events.txt', help='File to playback')
 args = parser.parse_args()
 
 granularity = args.granularity
@@ -230,9 +231,9 @@ def on_press(key):
             elif key.char in ['l', 'L']:
                 print("Loading recording from mouse_events.txt...")
                 with mouse_events_lock:
-                    mouse_events = load_events_from_file('mouse_events.txt')
+                    mouse_events = load_events_from_file(args.file)
                 total_time = sum(event[2] for event in mouse_events)
-                print("Recording loaded from mouse_events.txt!")
+                print(f"Recording loaded from {args.file}!")
                 print(f"Total recording time: {total_time} seconds")
             elif key.char in ['p', 'P'] and not playing_back and not recording:
                 print("Starting Playback!")
