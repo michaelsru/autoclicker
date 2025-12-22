@@ -9,7 +9,7 @@ from pynput import keyboard, mouse
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-g', '--granularity', type=float, default=0.01, help='Granularity between mouse events in seconds')
-parser.add_argument('-c', '--count', type=int, default=-1, help='Number of loops to playback')
+parser.add_argument('-c', '--count', type=int, default=1, help='Number of loops to playback')
 # add delay threshold
 parser.add_argument('-d', '--delay_threshold', type=float, default=0.05, help='Delay threshold in seconds')
 # add position threshold
