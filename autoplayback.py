@@ -7,287 +7,443 @@ import argparse
 import re
 from pynput import keyboard, mouse
 
-parser = argparse.ArgumentParser()
-parser.add_argument('-g', '--granularity', type=float, default=0.01, help='Granularity between mouse events in seconds')
-parser.add_argument('-c', '--count', type=int, default=1, help='Number of loops to playback')
-# add delay threshold
-parser.add_argument('-d', '--delay_threshold', type=float, default=0.05, help='Delay threshold in seconds')
-# add position threshold
-parser.add_argument('-p', '--position_threshold', type=float, default=0.0015, help='Position threshold in percentage')
-parser.add_argument('-f', '--file', type=str, default='mouse_events.txt', help='File to playback')
-args = parser.parse_args()
+# --- Classes ---
 
-granularity = args.granularity
-count = args.count
-delay_threshold = args.delay_threshold
-position_threshold = args.position_threshold
+class Reader:
+    def load(self, filename, loaded_files=None):
+        """Load mouse events from a text file, supporting nested blocks"""
+        if loaded_files is None:
+            loaded_files = set()
+        
+        if filename in loaded_files:
+            print(f"Warning: Circular reference detected for file: {filename}")
+            return []
+        
+        loaded_files.add(filename)
+        
+        try:
+            with open(filename, 'r') as f:
+                lines = f.readlines()
+            events, _ = self._parse_lines(lines, indent_level=0, loaded_files=loaded_files)
+            return events
+        except FileNotFoundError:
+            print(f"File not found: {filename}")
+            return []
+        except Exception as e:
+            print(f"Error loading file {filename}: {e}")
+            return []
 
-# Create instances of the mouse and keyboard controllers
-mouseController = mouse.Controller()
-keyboardController = keyboard.Controller()
+    def _parse_lines(self, lines, current_line_idx=0, indent_level=0, loaded_files=None):
+        events = []
+        i = current_line_idx
+        while i < len(lines):
+            line = lines[i].strip()
+            i += 1
+            
+            if not line or line.startswith('#'):
+                continue
+            
+            if line == '}':
+                return events, i
 
-# Initialize variables
-recording = False
-playing_back = False
-running = True
-mouse_events = []
-playback_thread = None
-recording_thread = None
-mouse_events_lock = threading.Lock()
-start_time = 0
-
-# Function to record mouse activity
-def record_mouse_activity():
-    global recording, mouse_events, start_time, last_event_time
-    start_time = time.time()
-    mouse_events = []
-    last_event_time = start_time
-    with mouse_events_lock:
-        mouse_events.append(('move', mouseController.position, 0))
-    while recording:
-        position = mouseController.position
-        if position != mouse_events[-1][1]:
-            current_time = time.time()
-            differential_seconds = current_time - last_event_time
-            print(f"{current_time - start_time:.2f} [{differential_seconds:.2f}]: Recording mouse position: {position}")
-            with mouse_events_lock:
-                mouse_events.append(('move', position, differential_seconds))
-            last_event_time = current_time
-        time.sleep(granularity)
-
-# Function to handle mouse clicks
-def on_click(x, y, button, pressed):
-    global last_event_time
-    if recording:
-        event_type = 'click'
-        current_time = time.time()
-        differential_seconds = current_time - last_event_time
-        print(f"Recording mouse click at {x}, {y} with button {button} and pressed state {pressed}")
-        with mouse_events_lock:
-            mouse_events.append((event_type, (x, y, button, pressed), differential_seconds))
-        last_event_time = current_time
-
-def on_scroll(x, y, dx, dy):
-    global last_event_time
-    if recording:
-        current_time = time.time()
-        differential_seconds = current_time - last_event_time
-        print(f"Recording mouse scroll at {x}, {y} with dx={dx}, dy={dy}")
-        with mouse_events_lock:
-            mouse_events.append(('scroll', (x, y, dx, dy), differential_seconds))
-        last_event_time = current_time
-
-# Function to parse and load events from a file
-def load_events_from_file(filename, loaded_files=None):
-    """Load mouse events from a text file, supporting both direct events and command syntax"""
-    if loaded_files is None:
-        loaded_files = set()
-    
-    # Prevent infinite recursion
-    if filename in loaded_files:
-        print(f"Warning: Circular reference detected for file: {filename}")
-        return []
-    
-    loaded_files.add(filename)
-    events = []
-    try:
-        with open(filename, 'r') as f:
-            for line in f.readlines():
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
+            if line.startswith('run '):
+                target_file = line[4:].strip()
+                print(f"{'  '*indent_level}Loading events from file: {target_file}")
+                # Recursively load using the same loaded_files set
+                imported_events = self.load(target_file, loaded_files) 
+                events.extend(imported_events)
                 
-                # Check if it's a command line
-                if line.startswith('run '):
-                    # Load events from another file
-                    target_file = line[4:].strip()
-                    print(f"Loading events from file: {target_file}")
-                    events.extend(load_events_from_file(target_file, loaded_files.copy()))
-                elif line.startswith('loop '):
-                    # Parse loop command: loop <count> <filename>
-                    parts = line[5:].strip().split(' ', 1)
-                    if len(parts) == 2:
-                        loop_count = int(parts[0])
-                        target_file = parts[1].strip()
-                        print(f"Looping {loop_count} times: {target_file}")
-                        loop_events = load_events_from_file(target_file, loaded_files.copy())
-                        for _ in range(loop_count):
-                            events.extend(loop_events)
-                else:
-                    # Parse regular event line
-                    try:
-                        event_type, event_data, delay = line.split('|')
-                        if event_type == 'move':
-                            position = tuple(map(float, re.findall(r'([-+]?\d*\.?\d+)', event_data)))
-                            event_data = position
-                        elif event_type == 'click':
-                            match = re.match(r"\(([-+]?\d*\.\d+|\d+), ([-+]?\d*\.\d+|\d+), <Button\.(\w+): .+>, (True|False)\)", event_data)
-                            if match:
-                                x, y, button, pressed = match.groups()
-                                x, y = float(x), float(y)
-                                button = getattr(mouse.Button, button)
-                                pressed = pressed == 'True'
-                                event_data = (x, y, button, pressed)
-                        elif event_type == 'scroll':
-                            x, y, dx, dy = map(float, re.findall(r'([-+]?\d*\.?\d+)', event_data))
-                            event_data = (x, y, dx, dy)
-                        elif event_type == 'spacebar':
-                            event_data = event_data == 'True'
-                        
-                        events.append((event_type, event_data, float(delay)))
-                    except Exception as e:
-                        print(f"Error parsing line: {line} - {e}")
-                        continue
-    except FileNotFoundError:
-        print(f"File not found: {filename}")
-    except Exception as e:
-        print(f"Error loading file {filename}: {e}")
-    
-    return events
+            elif line.startswith('loop '):
+                parts = line[5:].strip().split(' ', 1)
+                if len(parts) >= 1:
+                    loop_count = int(parts[0])
+                    rest = parts[1].strip() if len(parts) > 1 else ""
+                    
+                    if rest == '{':
+                        print(f"{'  '*indent_level}Parsing loop block: {loop_count} times")
+                        block_events, new_i = self._parse_lines(lines, i, indent_level + 1, loaded_files)
+                        i = new_i
+                        events.append({'type': 'loop', 'count': loop_count, 'events': block_events})
+                    elif rest: 
+                        # Legacy: loop <count> <filename>
+                        target_file = rest
+                        print(f"{'  '*indent_level}Looping explicitly from file: {loop_count} times: {target_file}")
+                        file_events = self.load(target_file, loaded_files)
+                        events.append({'type': 'loop', 'count': loop_count, 'events': file_events})
+                    else: 
+                         print(f"Syntax error on loop command: {line}")
 
-# Function to clear mouse events from memory
-def clear_mouse_events():
-    """Clear the mouse_events list to free memory"""
-    global mouse_events
-    with mouse_events_lock:
-        mouse_events.clear()
-    print("Mouse events cleared from memory!")
+            else:
+                try:
+                    event_type, event_data_str, delay = line.split('|')
+                    event = {'type': event_type, 'delay': float(delay)}
+                    
+                    if event_type == 'move':
+                        position = tuple(map(float, re.findall(r'([-+]?\d*\.?\d+)', event_data_str)))
+                        event['data'] = position
+                    elif event_type == 'click':
+                        match = re.match(r"\(([-+]?\d*\.\d+|\d+), ([-+]?\d*\.\d+|\d+), <Button\.(\w+): .+>, (True|False)\)", event_data_str)
+                        if match:
+                            x, y, button_name, pressed_str = match.groups()
+                            x, y = float(x), float(y)
+                            button = getattr(mouse.Button, button_name)
+                            pressed = pressed_str == 'True'
+                            event['data'] = (x, y, button, pressed)
+                    elif event_type == 'scroll':
+                        x, y, dx, dy = map(float, re.findall(r'([-+]?\d*\.?\d+)', event_data_str))
+                        event['data'] = (x, y, dx, dy)
+                    elif event_type == 'spacebar':
+                        event['data'] = event_data_str == 'True'
+                    
+                    events.append(event)
+                except Exception as e:
+                    print(f"Error parsing line: {line} - {e}")
+                    continue
+                    
+        return events, i
 
-# Function to play back mouse activity
-def play_back_mouse_activity():
-    global playing_back, count, mouse_events, delay_threshold, position_threshold
-    print(f'mouse events: {mouse_events}')
-    while playing_back:
-        if count != -1:
-            if count == 0:
-                playing_back = False
-                break
-            count -= 1
-        for event in mouse_events:
-            if not playing_back:
-                break
-            event_type, event_data, delay = event
-            print(f"Playing back mouse activity: {event_type}, {event_data}, delay: {delay}")
+class Writer:
+    def save(self, filename, events):
+        """Save mouse events to a text file"""
+        try:
+            with open(filename, 'w') as f:
+                self._write_events(f, events)
+            print(f"Events saved to {filename}")
+        except Exception as e:
+            print(f"Error saving file {filename}: {e}")
+
+    def _write_events(self, f, events, indent_level=0):
+        indent = "" # We don't indent standard events to keep compatibility, but we could
+        
+        for event in events:
+            event_type = event['type']
+            
+            if event_type == 'loop':
+                count = event['count']
+                sub_events = event['events']
+                f.write(f"{indent}loop {count} {{\n")
+                self._write_events(f, sub_events, indent_level + 1)
+                f.write(f"{indent}}}\n")
+                continue
+
+            # Standard events
+            delay = event['delay']
+            event_data = event.get('data')
+
             if event_type == 'move':
-                position = event_data
-                rand_position_scaler = random.uniform(-position_threshold, position_threshold)
-                modified_position = (position[0] * (1 + rand_position_scaler), position[1] * (1 + rand_position_scaler))
-                mouseController.position = modified_position
-                print(f"Moving mouse to {position}")
+                f.write(f"{event_type}|{event_data}|{delay}\n")
             elif event_type == 'click':
                 x, y, button, pressed = event_data
-                print(f"Clicking mouse at {x}, {y} with button {button} and pressed state {pressed}")
-                if pressed:
-                    mouseController.press(button)
-                else:
-                    mouseController.release(button)
+                # Reconstruct string format: <Button.left: ((1, 2, 6), 0)>
+                # This is a bit hacky to match the exact string format Pynput produces/parser expects
+                button_str = str(button) # e.g. Button.left
+                # Logic to approximate the internal representation output if needed, 
+                # or just rely on the parser being flexible. 
+                # The regex expects: <Button.(\w+): .+>
+                # Let's reconstruct a valid string for the regex:
+                btn_name = button.name
+                dummy_internal = "((0,0,0),0)" # Placeholder
+                btn_repr = f"<Button.{btn_name}: {dummy_internal}>"
+                f.write(f"{event_type}|({x}, {y}, {btn_repr}, {pressed})|{delay}\n")
             elif event_type == 'scroll':
                 x, y, dx, dy = event_data
-                print(f"Scrolling mouse at {x}, {y} with dx={dx}, dy={dy}")
-                mouseController.scroll(dx, dy)
+                f.write(f"{event_type}|({x}, {y}, {dx}, {dy})|{delay}\n")
             elif event_type == 'spacebar':
-                if event_data:  # True for press, False for release
-                    print("Pressing spacebar")
-                    keyboardController.press(keyboard.Key.space)
-                else:
-                    print("Releasing spacebar")
-                    keyboardController.release(keyboard.Key.space)
-            rand_delay_scaler = random.uniform(-delay_threshold, delay_threshold)
-            print(f"Random delay scaler: {rand_delay_scaler}")
-            delay *= (1 + rand_delay_scaler)
-            time.sleep(delay)
+                f.write(f"{event_type}|{event_data}|{delay}\n")
 
-# Function to handle key presses
-def on_press(key):
-    global recording, playing_back, playback_thread, recording_thread, count, mouse_events, last_event_time
+class Editor:
+    def scale_timing(self, events, scale_factor):
+        """Scale the timing of all events by a factor"""
+        scaled_events = []
+        for event in events:
+            new_event = event.copy() # Shallow copy
+            if event['type'] == 'loop':
+                # Recursive scale
+                new_event['events'] = self.scale_timing(event['events'], scale_factor)
+            else:
+                new_event['delay'] = float(event['delay']) * scale_factor
+            scaled_events.append(new_event)
+        return scaled_events
 
-    try:
-        if key == keyboard.Key.space and recording:
+class Recorder:
+    def __init__(self, granularity=0.01):
+        self.granularity = granularity
+        self.mouse_events = []
+        self.recording = False
+        self.start_time = 0
+        self.last_event_time = 0
+        self.lock = threading.Lock()
+        self.mouse_controller = mouse.Controller()
+        self.thread = None
+        self.listener_mouse = None
+
+    def start(self):
+        if self.recording: return
+        print("Starting Recording!")
+        self.recording = True
+        self.mouse_events = []
+        self.start_time = time.time()
+        self.last_event_time = self.start_time
+        
+        # Initial position
+        with self.lock:
+            self.mouse_events.append({'type': 'move', 'data': self.mouse_controller.position, 'delay': 0})
+        
+        # Start mouse polling thread for movement
+        self.thread = threading.Thread(target=self._record_loop)
+        self.thread.start()
+        
+        # Start listener (if not globally managed, but here we can attach it)
+        # Note: In the original, listeners were global. Ideally, we attach/detach them here.
+        # For now, we will rely on global hooks calling callbacks on this instance, 
+        # or we start a temporary listener. Let's make this class handle its own listeners for cleaner OOP.
+        self.listener_mouse = mouse.Listener(on_click=self._on_click, on_scroll=self._on_scroll)
+        self.listener_mouse.start()
+
+    def stop(self):
+        if not self.recording: return
+        self.recording = False
+        if self.thread:
+            self.thread.join()
+        if self.listener_mouse:
+            self.listener_mouse.stop()
+        print("Recording stopped!")
+
+    def _record_loop(self):
+        while self.recording:
+            position = self.mouse_controller.position
+            # Verify we have at least one event
+            with self.lock:
+                last_pos = self.mouse_events[-1]['data'] if self.mouse_events and self.mouse_events[-1]['type'] == 'move' else None
+            
+            if position != last_pos:
+                current_time = time.time()
+                delay = current_time - self.last_event_time
+                print(f"{current_time - self.start_time:.2f} [{delay:.2f}]: Recording mouse position: {position}")
+                with self.lock:
+                    self.mouse_events.append({'type': 'move', 'data': position, 'delay': delay})
+                self.last_event_time = current_time
+            time.sleep(self.granularity)
+
+    def _on_click(self, x, y, button, pressed):
+        if self.recording:
             current_time = time.time()
-            differential_seconds = current_time - last_event_time
-            print(f"Recording spacebar press")
-            with mouse_events_lock:
-                mouse_events.append(('spacebar', True, differential_seconds))
-            last_event_time = current_time
-        elif hasattr(key, 'char'):
-            if key.char in ['r', 'R'] and not recording and not playing_back:
-                print("Starting Recording!")
-                recording = True
-                recording_thread = threading.Thread(target=record_mouse_activity)
-                recording_thread.start()
-            elif key.char in ['s', 'S'] and recording:
-                recording = False
-                if recording_thread:
-                    recording_thread.join()
-                print("Recording stopped!")
-            # save recording to file
+            delay = current_time - self.last_event_time
+            print(f"Recording click at {x}, {y} {button} {pressed}")
+            with self.lock:
+                self.mouse_events.append({'type': 'click', 'data': (x, y, button, pressed), 'delay': delay})
+            self.last_event_time = current_time
+
+    def _on_scroll(self, x, y, dx, dy):
+        if self.recording:
+            current_time = time.time()
+            delay = current_time - self.last_event_time
+            print(f"Recording scroll {dx}, {dy}")
+            with self.lock:
+                self.mouse_events.append({'type': 'scroll', 'data': (x, y, dx, dy), 'delay': delay})
+            self.last_event_time = current_time
+
+    def on_spacebar(self, pressed):
+        if self.recording:
+            current_time = time.time()
+            delay = current_time - self.last_event_time
+            print(f"Recording spacebar {'press' if pressed else 'release'}")
+            with self.lock:
+                self.mouse_events.append({'type': 'spacebar', 'data': pressed, 'delay': delay})
+            self.last_event_time = current_time
+
+    def get_events(self):
+        with self.lock:
+            return list(self.mouse_events)
+
+class Player:
+    def __init__(self, controller_mouse, controller_keyboard, position_threshold=5.0, delay_threshold=0.05):
+        self.mouse = controller_mouse
+        self.keyboard = controller_keyboard
+        self.position_threshold = position_threshold
+        self.delay_threshold = delay_threshold
+        self.playing = False
+        self.thread = None
+
+    def play(self, events, loop_count=1, dry_run=False):
+        if self.playing: return
+        print("Starting Playback!")
+        self.playing = True
+        
+        if dry_run:
+            print("--- DRY RUN START ---")
+            self._dry_run_recursive(events)
+            print("--- DRY RUN END ---")
+            self.playing = False
+            return
+
+        self.thread = threading.Thread(target=self._play_loop, args=(events, loop_count))
+        self.thread.start()
+
+    def stop(self):
+        if not self.playing: return
+        self.playing = False
+        if self.thread:
+            self.thread.join()
+        print("Playback stopped!")
+
+    def _play_loop(self, events, loop_count):
+        current_loop = loop_count
+        while self.playing:
+            if current_loop != -1:
+                if current_loop == 0:
+                    break
+                current_loop -= 1
+            
+            self._execute_recursive(events)
+        self.playing = False
+
+    def _execute_recursive(self, events, level=0):
+        if not self.playing: return
+
+        for event in events:
+            if not self.playing: break
+            
+            event_type = event['type']
+            
+            if event_type == 'loop':
+                count = event['count']
+                sub_events = event['events']
+                print(f"{'  '*level}Looping {count} times...")
+                for _ in range(count):
+                    if not self.playing: break
+                    self._execute_recursive(sub_events, level + 1)
+                continue
+
+            event_data = event.get('data')
+            delay = event['delay']
+            
+            print(f"{'  '*level}Playing: {event_type}, delay: {delay}")
+            
+            if event_type == 'move':
+                position = event_data
+                dx = random.uniform(-self.position_threshold, self.position_threshold)
+                dy = random.uniform(-self.position_threshold, self.position_threshold)
+                self.mouse.position = (position[0] + dx, position[1] + dy)
+            
+            elif event_type == 'click':
+                x, y, button, pressed = event_data
+                if pressed: self.mouse.press(button)
+                else: self.mouse.release(button)
+                
+            elif event_type == 'scroll':
+                x, y, dx, dy = event_data
+                self.mouse.scroll(dx, dy)
+                
+            elif event_type == 'spacebar':
+                if event_data: self.keyboard.press(keyboard.Key.space)
+                else: self.keyboard.release(keyboard.Key.space)
+            
+            # Delay handling
+            rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
+            actual_delay = delay * (1 + rand_delay)
+            if actual_delay < 0: actual_delay = 0
+            time.sleep(actual_delay)
+
+    def _dry_run_recursive(self, events, level=0):
+        indent = '  ' * level
+        for event in events:
+            if event['type'] == 'loop':
+                print(f"{indent}Loop {event['count']} times {{")
+                self._dry_run_recursive(event['events'], level + 1)
+                print(f"{indent}}}")
+            else:
+                print(f"{indent}{event['type']} | delay={event['delay']}")
+
+# --- Main Application ---
+
+class AutoClickerApp:
+    def __init__(self):
+        self.parser = argparse.ArgumentParser()
+        self.parser.add_argument('-g', '--granularity', type=float, default=0.01, help='Granularity for recording (s)')
+        self.parser.add_argument('-c', '--count', type=int, default=1, help='Loop count')
+        self.parser.add_argument('-d', '--delay_threshold', type=float, default=0.05, help='Delay Jitter (s)')
+        self.parser.add_argument('-p', '--position_threshold', type=float, default=5.0, help='Position Jitter (px)')
+        self.parser.add_argument('-f', '--file', type=str, default='mouse_events.txt', help='File to load/save')
+        self.parser.add_argument('--dry-run', action='store_true', help='Dry run')
+        self.args = self.parser.parse_args()
+
+        self.reader = Reader()
+        self.writer = Writer()
+        self.editor = Editor()
+        self.recorder = Recorder(granularity=self.args.granularity)
+        self.player = Player(
+            mouse.Controller(), 
+            keyboard.Controller(), 
+            position_threshold=self.args.position_threshold,
+            delay_threshold=self.args.delay_threshold
+        )
+        
+        self.running = True
+        self.loaded_events = []
+
+    def run(self):
+        # Auto-load or dry-run
+        self.loaded_events = self.reader.load(self.args.file)
+        if self.args.dry_run:
+            self.player.play(self.loaded_events, loop_count=self.args.count, dry_run=True)
+            return
+
+        print("\n=== Controls ===")
+        print("R: Start Recording")
+        print("S: Stop Recording")
+        print("P: Playback")
+        print("E: Stop Playback")
+        print("W: Save to file")
+        print("L: Load from file")
+        print("ESC: Quit")
+        
+        # We need a Persistent Keyboard Listener for global hotkeys
+        with keyboard.Listener(on_press=self._on_key_press, on_release=self._on_key_release) as listener:
+            listener.join()
+
+    def _on_key_press(self, key):
+        try:
+            # Spacebar special handling for recorder
+            if key == keyboard.Key.space and self.recorder.recording:
+                self.recorder.on_spacebar(True)
+                return
+
+            if not hasattr(key, 'char'): return
+
+            if key.char in ['r', 'R'] and not self.recorder.recording and not self.player.playing:
+                self.recorder.start()
+            
+            elif key.char in ['s', 'S'] and self.recorder.recording:
+                self.recorder.stop()
+                self.loaded_events = self.recorder.get_events() # Update working memory
+            
             elif key.char in ['w', 'W']:
-                print("Saving recording to mouse_events.txt...")
-                with open('mouse_events.txt', 'w') as f:
-                    for event in mouse_events:
-                        f.write(f"{event[0]}|{event[1]}|{event[2]}\n")
-                print("Recording saved to mouse_events.txt!")
-            # load recording from file
+                self.writer.save(self.args.file, self.loaded_events)
+            
             elif key.char in ['l', 'L']:
-                print("Loading recording from mouse_events.txt...")
-                with mouse_events_lock:
-                    mouse_events = load_events_from_file(args.file)
-                total_time = sum(event[2] for event in mouse_events)
-                print(f"Recording loaded from {args.file}!")
-                print(f"Total recording time: {total_time} seconds")
-            elif key.char in ['p', 'P'] and not playing_back and not recording:
-                print("Starting Playback!")
-                playing_back = True
-                count = args.count
-                playback_thread = threading.Thread(target=play_back_mouse_activity)
-                playback_thread.start()
-            elif key.char in ['e', 'E'] and playing_back:
-                playing_back = False
-                if playback_thread:
-                    playback_thread.join()
-                print("Playback stopped!")
-            # clear memory
-            elif key.char in ['c', 'C']:
-                clear_mouse_events()
-    except AttributeError:
-        pass
+                self.loaded_events = self.reader.load(self.args.file)
+                print(f"Loaded {len(self.loaded_events)} items from {self.args.file}")
 
-# Function to handle key releases (to exit the program)
-def on_release(key):
-    global running, recording, playing_back, recording_thread, playback_thread, last_event_time
+            elif key.char in ['p', 'P'] and not self.player.playing and not self.recorder.recording:
+                self.player.play(self.loaded_events, loop_count=self.args.count)
+            
+            elif key.char in ['e', 'E'] and self.player.playing:
+                self.player.stop()
 
-    if key == keyboard.Key.space and recording:
-        current_time = time.time()
-        differential_seconds = current_time - last_event_time
-        print(f"Recording spacebar release")
-        with mouse_events_lock:
-            mouse_events.append(('spacebar', False, differential_seconds))
-        last_event_time = current_time
-    elif key == keyboard.Key.esc:
-        # Stop listener and cleanup
-        running = False
-        recording = False
-        playing_back = False
+        except AttributeError:
+            pass
+
+    def _on_key_release(self, key):
+        if key == keyboard.Key.space and self.recorder.recording:
+            self.recorder.on_spacebar(False)
         
-        # Clean up threads
-        if recording_thread and recording_thread.is_alive():
-            recording_thread.join()
-        if playback_thread and playback_thread.is_alive():
-            playback_thread.join()
-        
-        # Stop listeners
-        mouseListener.stop()
-        keyboardListener.stop()
-        
-        return False
+        elif key == keyboard.Key.esc:
+            self.running = False
+            self.recorder.stop()
+            self.player.stop()
+            return False
 
-# Create a mouse listener
-mouseListener = mouse.Listener(on_click=on_click, on_scroll=on_scroll)
-mouseListener.start()
-
-# Create a keyboard listener
-keyboardListener = keyboard.Listener(on_press=on_press, on_release=on_release)
-keyboardListener.start()
-
-while running:
-    time.sleep(0.1)
+if __name__ == '__main__':
+    app = AutoClickerApp()
+    app.run()
