@@ -165,6 +165,27 @@ class Editor:
             scaled_events.append(new_event)
         return scaled_events
 
+    def get_total_time(self, events):
+        total_time_seconds = 0
+        for event in events:
+            if event['type'] == 'loop':
+                total_time_seconds += self.get_total_time(event['events'])
+            else:
+                total_time_seconds += float(event['delay'])
+        total_time = self._get_readable_time(total_time_seconds)
+        return total_time
+
+    def _get_readable_time(self, seconds):
+        time_string = ""
+        hours = int(seconds // 3600)
+        if hours > 0:
+            time_string += f"{hours}h "
+        minutes = int((seconds % 3600) // 60)
+        if minutes > 0:
+            time_string += f"{minutes}m "
+        time_string += f"{seconds:.2f}s"
+        return time_string
+
 class Recorder:
     def __init__(self, granularity=0.01):
         self.granularity = granularity
@@ -362,9 +383,11 @@ class AutoClickerApp:
         self.parser = argparse.ArgumentParser()
         self.parser.add_argument('-g', '--granularity', type=float, default=0.01, help='Granularity for recording (s)')
         self.parser.add_argument('-c', '--count', type=int, default=1, help='Loop count')
-        self.parser.add_argument('-d', '--delay_threshold', type=float, default=0.05, help='Delay Jitter (s)')
-        self.parser.add_argument('-p', '--position_threshold', type=float, default=5.0, help='Position Jitter (px)')
+        self.parser.add_argument('-d', '--delay_threshold', type=float, default=0, help='Delay Jitter (s)')
+        self.parser.add_argument('-p', '--position_threshold', type=float, default=0, help='Position Jitter (px)')
         self.parser.add_argument('-f', '--file', type=str, default='mouse_events.txt', help='File to load/save')
+        self.parser.add_argument('-s', '--scale', type=float, default=1.0, help='Timing scale factor')
+        self.parser.add_argument('-o', '--output', type=str, help='Output file (default: overwrites input file)')
         self.parser.add_argument('--dry-run', action='store_true', help='Dry run')
         self.args = self.parser.parse_args()
 
@@ -418,18 +441,51 @@ class AutoClickerApp:
                 self.recorder.stop()
                 self.loaded_events = self.recorder.get_events() # Update working memory
             
+            elif key.char in ['t', 'T'] and not self.recorder.recording and not self.player.playing:
+                # Scale timing using CLI arg
+                print(f"Scaling timing by factor: {self.args.scale}")
+                self.loaded_events = self.editor.scale_timing(self.loaded_events, self.args.scale)
+                print(f"Scaled timing complete.")
+
+            elif key.char in ['i', 'I'] and not self.recorder.recording and not self.player.playing:
+                try:
+                    scale_input = input("Enter timing scale factor (e.g., 0.5 for 2x faster): \n")
+                    scale_factor = float(scale_input)
+                    print(f"Scaling timing by factor: {scale_factor}")
+                    self.loaded_events = self.editor.scale_timing(self.loaded_events, scale_factor)
+                    print(f"Scaled timing complete.")
+                except ValueError:
+                    print("Invalid scale factor.")
+                except Exception as e:
+                    print(f"Error scaling: {e}")
+            
             elif key.char in ['w', 'W']:
-                self.writer.save(self.args.file, self.loaded_events)
+                out_file = self.args.output if self.args.output else self.args.file
+                self.writer.save(out_file, self.loaded_events)
             
             elif key.char in ['l', 'L']:
                 self.loaded_events = self.reader.load(self.args.file)
                 print(f"Loaded {len(self.loaded_events)} items from {self.args.file}")
+                print(f"total time: {self.editor.get_total_time(self.loaded_events)}")
 
             elif key.char in ['p', 'P'] and not self.player.playing and not self.recorder.recording:
                 self.player.play(self.loaded_events, loop_count=self.args.count)
             
             elif key.char in ['e', 'E'] and self.player.playing:
                 self.player.stop()
+
+            elif key.char in ['h', 'H']:
+                print("\n=== Controls ===")
+                print("R: Start Recording")
+                print("S: Stop Recording")
+                print("T: Scale Timing")
+                print("I: Interactive Scale")
+                print("P: Playback")
+                print("E: Stop Playback")
+                print("W: Save to file")
+                print("L: Load from file")
+                print("H: Show Help")
+                print("ESC: Quit")
 
         except AttributeError:
             pass
