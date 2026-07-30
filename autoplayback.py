@@ -5,9 +5,13 @@ import threading
 import random
 import argparse
 import re
+import logging
 from pynput import keyboard, mouse
 
 # --- Classes ---
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class Reader:
     def load(self, filename, loaded_files=None):
@@ -16,7 +20,7 @@ class Reader:
             loaded_files = set()
         
         if filename in loaded_files:
-            print(f"Warning: Circular reference detected for file: {filename}")
+            logger.warning(f"Circular reference detected for file: {filename}")
             return []
         
         loaded_files.add(filename)
@@ -27,10 +31,10 @@ class Reader:
             events, _ = self._parse_lines(lines, indent_level=0, loaded_files=loaded_files)
             return events
         except FileNotFoundError:
-            print(f"File not found: {filename}")
+            logger.warning(f"File not found: {filename}")
             return []
         except Exception as e:
-            print(f"Error loading file {filename}: {e}")
+            logger.warning(f"Error loading file {filename}: {e}")
             return []
 
     def _parse_lines(self, lines, current_line_idx=0, indent_level=0, loaded_files=None):
@@ -48,7 +52,7 @@ class Reader:
 
             if line.startswith('run '):
                 target_file = line[4:].strip()
-                print(f"{'  '*indent_level}Loading events from file: {target_file}")
+                logger.info(f"{'  '*indent_level}Loading events from file: {target_file}")
                 # Recursively load using the same loaded_files set
                 imported_events = self.load(target_file, loaded_files) 
                 events.extend(imported_events)
@@ -60,18 +64,18 @@ class Reader:
                     rest = parts[1].strip() if len(parts) > 1 else ""
                     
                     if rest == '{':
-                        print(f"{'  '*indent_level}Parsing loop block: {loop_count} times")
+                        logger.info(f"{'  '*indent_level}Parsing loop block: {loop_count} times")
                         block_events, new_i = self._parse_lines(lines, i, indent_level + 1, loaded_files)
                         i = new_i
                         events.append({'type': 'loop', 'count': loop_count, 'events': block_events})
                     elif rest: 
                         # Legacy: loop <count> <filename>
                         target_file = rest
-                        print(f"{'  '*indent_level}Looping explicitly from file: {loop_count} times: {target_file}")
+                        logger.info(f"{'  '*indent_level}Looping explicitly from file: {loop_count} times: {target_file}")
                         file_events = self.load(target_file, loaded_files)
                         events.append({'type': 'loop', 'count': loop_count, 'events': file_events})
                     else: 
-                         print(f"Syntax error on loop command: {line}")
+                        logger.warning(f"Syntax error on loop command: {line}")
 
             else:
                 try:
@@ -97,7 +101,7 @@ class Reader:
                     
                     events.append(event)
                 except Exception as e:
-                    print(f"Error parsing line: {line} - {e}")
+                    logger.warning(f"Error parsing line: {line} - {e}")
                     continue
                     
         return events, i
@@ -108,9 +112,9 @@ class Writer:
         try:
             with open(filename, 'w') as f:
                 self._write_events(f, events)
-            print(f"Events saved to {filename}")
+            logger.info(f"Events saved to {filename}")
         except Exception as e:
-            print(f"Error saving file {filename}: {e}")
+            logger.warning(f"Error saving file {filename}: {e}")
 
     def _write_events(self, f, events, indent_level=0):
         indent = "" # We don't indent standard events to keep compatibility, but we could
@@ -166,14 +170,17 @@ class Editor:
         return scaled_events
 
     def get_total_time(self, events):
+        total_time_seconds = self._calculate_total_seconds(events)
+        return self._get_readable_time(total_time_seconds)
+
+    def _calculate_total_seconds(self, events):
         total_time_seconds = 0
         for event in events:
             if event['type'] == 'loop':
-                total_time_seconds += self.get_total_time(event['events'])
+                total_time_seconds += self._calculate_total_seconds(event['events']) * event['count']
             else:
                 total_time_seconds += float(event['delay'])
-        total_time = self._get_readable_time(total_time_seconds)
-        return total_time
+        return total_time_seconds
 
     def _get_readable_time(self, seconds):
         time_string = ""
@@ -292,9 +299,9 @@ class Player:
         self.playing = True
         
         if dry_run:
-            print("--- DRY RUN START ---")
+            logger.info("--- DRY RUN START ---")
             self._dry_run_recursive(events)
-            print("--- DRY RUN END ---")
+            logger.info("--- DRY RUN END ---")
             self.playing = False
             return
 
@@ -370,11 +377,11 @@ class Player:
         indent = '  ' * level
         for event in events:
             if event['type'] == 'loop':
-                print(f"{indent}Loop {event['count']} times {{")
+                logger.info(f"{indent}Loop {event['count']} times {{")
                 self._dry_run_recursive(event['events'], level + 1)
-                print(f"{indent}}}")
-            else:
-                print(f"{indent}{event['type']} | delay={event['delay']}")
+                logger.info(f"{indent}}}")
+            # else:
+                # print(f"{indent}{event['type']} | delay={event['delay']}")
 
 # --- Main Application ---
 
@@ -423,7 +430,13 @@ class AutoClickerApp:
         
         # We need a Persistent Keyboard Listener for global hotkeys
         with keyboard.Listener(on_press=self._on_key_press, on_release=self._on_key_release) as listener:
-            listener.join()
+            try:
+                listener.join()
+            except KeyboardInterrupt:
+                self.running = False
+                self.recorder.stop()
+                self.player.stop()
+                print("\nExiting...")
 
     def _on_key_press(self, key):
         try:
@@ -443,21 +456,21 @@ class AutoClickerApp:
             
             elif key.char in ['t', 'T'] and not self.recorder.recording and not self.player.playing:
                 # Scale timing using CLI arg
-                print(f"Scaling timing by factor: {self.args.scale}")
+                logger.info(f"Scaling timing by factor: {self.args.scale}")
                 self.loaded_events = self.editor.scale_timing(self.loaded_events, self.args.scale)
-                print(f"Scaled timing complete.")
+                logger.info(f"Scaled timing complete.")
 
             elif key.char in ['i', 'I'] and not self.recorder.recording and not self.player.playing:
                 try:
                     scale_input = input("Enter timing scale factor (e.g., 0.5 for 2x faster): \n")
                     scale_factor = float(scale_input)
-                    print(f"Scaling timing by factor: {scale_factor}")
+                    logger.info(f"Scaling timing by factor: {scale_factor}")
                     self.loaded_events = self.editor.scale_timing(self.loaded_events, scale_factor)
-                    print(f"Scaled timing complete.")
+                    logger.info(f"Scaled timing complete.")
                 except ValueError:
-                    print("Invalid scale factor.")
+                    logger.warning("Invalid scale factor.")
                 except Exception as e:
-                    print(f"Error scaling: {e}")
+                    logger.warning(f"Error scaling: {e}")
             
             elif key.char in ['w', 'W']:
                 out_file = self.args.output if self.args.output else self.args.file
@@ -465,8 +478,8 @@ class AutoClickerApp:
             
             elif key.char in ['l', 'L']:
                 self.loaded_events = self.reader.load(self.args.file)
-                print(f"Loaded {len(self.loaded_events)} items from {self.args.file}")
-                print(f"total time: {self.editor.get_total_time(self.loaded_events)}")
+                logger.info(f"Loaded {len(self.loaded_events)} items from {self.args.file}")
+                logger.info(f"total time: {self.editor.get_total_time(self.loaded_events)}")
 
             elif key.char in ['p', 'P'] and not self.player.playing and not self.recorder.recording:
                 self.player.play(self.loaded_events, loop_count=self.args.count)
@@ -502,4 +515,7 @@ class AutoClickerApp:
 
 if __name__ == '__main__':
     app = AutoClickerApp()
-    app.run()
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        pass
