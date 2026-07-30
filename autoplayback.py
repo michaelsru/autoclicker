@@ -45,6 +45,22 @@ class LoopEvent:
     count: int
     events: list
 
+@dataclass(slots=True)
+class WaitPixelEvent:
+    x: int
+    y: int
+    r: int
+    g: int
+    b: int
+    tolerance: int
+    timeout: float
+    delay: float
+
+@dataclass(slots=True)
+class LogEvent:
+    message: str
+    delay: float
+
 # --- Classes ---
 
 logging.basicConfig(level=logging.INFO)
@@ -133,6 +149,17 @@ class Reader:
                         events.append(ScrollEvent(x=x, y=y, dx=dx, dy=dy, delay=delay))
                     elif event_type == 'spacebar':
                         events.append(SpacebarEvent(pressed=event_data_str.strip() == 'True', delay=delay))
+                    elif event_type == 'wait_pixel':
+                        nums = list(map(float, re.findall(r'([-+]?\d*\.?\d+)', event_data_str)))
+                        # format: (x, y, r, g, b, tolerance, timeout)
+                        events.append(WaitPixelEvent(
+                            x=int(nums[0]), y=int(nums[1]),
+                            r=int(nums[2]), g=int(nums[3]), b=int(nums[4]),
+                            tolerance=int(nums[5]), timeout=float(nums[6]),
+                            delay=delay,
+                        ))
+                    elif event_type == 'log':
+                        events.append(LogEvent(message=event_data_str.strip(), delay=delay))
                 except Exception as e:
                     logger.warning(f"Error parsing line: {line} - {e}")
                     continue
@@ -166,6 +193,13 @@ class Writer:
                 f.write(f"scroll|({event.x}, {event.y}, {event.dx}, {event.dy})|{event.delay}\n")
             elif isinstance(event, SpacebarEvent):
                 f.write(f"spacebar|{event.pressed}|{event.delay}\n")
+            elif isinstance(event, WaitPixelEvent):
+                f.write(
+                    f"wait_pixel|({event.x}, {event.y}, {event.r}, {event.g}, {event.b}, "
+                    f"{event.tolerance}, {event.timeout})|{event.delay}\n"
+                )
+            elif isinstance(event, LogEvent):
+                f.write(f"log|{event.message}|{event.delay}\n")
 
 class Editor:
     def scale_timing(self, events, scale_factor):
@@ -396,11 +430,43 @@ class Player:
             elif isinstance(event, SpacebarEvent):
                 if event.pressed: self.keyboard.press(keyboard.Key.space)
                 else: self.keyboard.release(keyboard.Key.space)
+            elif isinstance(event, WaitPixelEvent):
+                self._wait_pixel(event)
+            elif isinstance(event, LogEvent):
+                sys.stdout.write(f"\r\033[K[LOG] {event.message}\n")
+                sys.stdout.flush()
 
             self._event_count += 1
             rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
             actual_delay = max(0, event.delay * (1 + rand_delay))
             time.sleep(actual_delay)
+
+    def _wait_pixel(self, event):
+        try:
+            import mss
+        except ImportError:
+            logger.error("wait_pixel requires mss: pip install mss")
+            return
+
+        deadline = time.time() + event.timeout
+        with mss.MSS() as sct:
+            monitor = {"top": event.y, "left": event.x, "width": 1, "height": 1}
+            while time.time() < deadline and self.playing:
+                try:
+                    shot = sct.grab(monitor)
+                    b, g, r = shot.raw[0], shot.raw[1], shot.raw[2]  # BGRA
+                    if (abs(r - event.r) <= event.tolerance and
+                            abs(g - event.g) <= event.tolerance and
+                            abs(b - event.b) <= event.tolerance):
+                        return  # matched
+                except Exception as e:
+                    logger.warning(f"wait_pixel grab error: {e}")
+                    return
+                time.sleep(0.05)
+        logger.warning(
+            f"wait_pixel timed out after {event.timeout}s "
+            f"at ({event.x}, {event.y}) target=({event.r},{event.g},{event.b})"
+        )
 
     def _dry_run_recursive(self, events, level=0):
         indent = '  ' * level
