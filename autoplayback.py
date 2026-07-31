@@ -61,6 +61,11 @@ class LogEvent:
     message: str
     delay: float
 
+# --- Exceptions ---
+
+class _PixelTimeout(Exception):
+    """Raised when a wait_pixel event times out."""
+
 # --- Classes ---
 
 logging.basicConfig(level=logging.INFO)
@@ -372,7 +377,18 @@ class Player:
                 current_loop -= 1
 
             iter_start = time.time()
-            self._execute_recursive(events)
+            try:
+                self._execute_recursive(events)
+            except _PixelTimeout as e:
+                sys.stdout.write(f"\r\033[K[TIMEOUT] {e} — restarting iteration\n")
+                sys.stdout.flush()
+                try:
+                    self._execute_recursive(events)
+                except _PixelTimeout as e2:
+                    sys.stdout.write(f"\r\033[K[TIMEOUT] {e2} on restart — stopping playback\n")
+                    sys.stdout.flush()
+                    self.playing = False
+                    break
             self._iteration += 1
 
             elapsed = time.time() - self._start_time
@@ -481,7 +497,7 @@ class Player:
                     logger.warning(f"wait_pixel grab error: {e}")
                     return
                 time.sleep(0.05)
-        logger.warning(
+        raise _PixelTimeout(
             f"wait_pixel timed out after {event.timeout}s "
             f"at ({event.x}, {event.y}) target=({event.r},{event.g},{event.b})"
         )
