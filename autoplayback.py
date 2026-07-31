@@ -379,18 +379,19 @@ class Player:
             iter_time = time.time() - iter_start
             rate = self._iteration / elapsed if elapsed > 0 else 0
 
+            elapsed_str = self._format_time(elapsed)
             if total is not None:
                 done = self._iteration
                 eta = ((total - done) / rate) if rate > 0 else float('inf')
-                eta_str = f"{eta:.0f}s" if eta != float('inf') else "?"
+                eta_str = self._format_time(eta)
                 line = (
-                    f"iter={done}/{total}  elapsed={elapsed:.1f}s  "
+                    f"iter={done}/{total}  elapsed={elapsed_str}  "
                     f"iter_time={iter_time:.2f}s  rate={rate:.2f}/s  "
                     f"eta={eta_str}  events={self._event_count}"
                 )
             else:
                 line = (
-                    f"iter={self._iteration}  elapsed={elapsed:.1f}s  "
+                    f"iter={self._iteration}  elapsed={elapsed_str}  "
                     f"iter_time={iter_time:.2f}s  rate={rate:.2f}/s  "
                     f"events={self._event_count}"
                 )
@@ -399,6 +400,23 @@ class Player:
             sys.stdout.flush()
 
         self.playing = False
+
+    def _format_time(self, seconds):
+        if seconds == float('inf') or seconds is None or math.isnan(seconds):
+            return "?"
+        seconds = int(round(seconds))
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+
+        parts = []
+        if hours > 0:
+            parts.append(f"{hours}h")
+        if minutes > 0:
+            parts.append(f"{minutes}m")
+        if secs > 0 or not parts:
+            parts.append(f"{secs}s")
+        return " ".join(parts)
 
     def _execute_recursive(self, events, level=0):
         if not self.playing: return
