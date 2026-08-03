@@ -380,12 +380,12 @@ class Player:
             try:
                 self._execute_recursive(events)
             except _PixelTimeout as e:
-                sys.stdout.write(f"\r\033[K[TIMEOUT] {e} — restarting iteration\n")
+                sys.stdout.write(f"\n[TIMEOUT] {e} — restarting iteration\n")
                 sys.stdout.flush()
                 try:
                     self._execute_recursive(events)
                 except _PixelTimeout as e2:
-                    sys.stdout.write(f"\r\033[K[TIMEOUT] {e2} on restart — stopping playback\n")
+                    sys.stdout.write(f"\n[TIMEOUT] {e2} on restart — stopping playback\n")
                     sys.stdout.flush()
                     self.playing = False
                     break
