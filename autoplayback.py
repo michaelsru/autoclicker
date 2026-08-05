@@ -9,6 +9,7 @@ import re
 import math
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from pynput import keyboard, mouse
 
 # --- Event types ---
@@ -61,6 +62,29 @@ class LogEvent:
     message: str
     delay: float
 
+@dataclass(slots=True)
+class WaitPixelsEvent:
+    """Multi-pixel wait with AND/OR logic.
+    pixels: tuple of (x, y, r, g, b, tolerance) tuples
+    mode: 'and' | 'or'
+    """
+    pixels: tuple
+    mode: str
+    timeout: float
+    delay: float
+
+@dataclass(slots=True)
+class FindFishingSpotEvent:
+    """Scans `region` for tile-colored pixels, clusters into spots,
+    clicks the one closest to `char`."""
+    region: tuple  # (x1,y1,x2,y2) — full search area
+    color: tuple   # (r,g,b)        — tile marker color
+    tol: int       # per-channel tolerance
+    timeout: float # seconds to wait for a spot to appear
+    char: tuple    # (cx,cy)        — character screen pos for closest-spot selection
+    button: str    # 'left' | 'right'
+    delay: float
+
 # --- Exceptions ---
 
 class _PixelTimeout(Exception):
@@ -68,8 +92,16 @@ class _PixelTimeout(Exception):
 
 # --- Classes ---
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s:%(name)s:%(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
 logger = logging.getLogger(__name__)
+
+def _ts():
+    """Current time as HH:MM:SS for inline stdout messages."""
+    return datetime.now().strftime('%H:%M:%S')
 
 class Reader:
     def load(self, filename, loaded_files=None):
@@ -165,6 +197,27 @@ class Reader:
                         ))
                     elif event_type == 'log':
                         events.append(LogEvent(message=event_data_str.strip(), delay=delay))
+                    elif event_type == 'find_fishing_spot':
+                        def _g4(name):
+                            m = re.search(rf'{name}=\((\d+),(\d+),(\d+),(\d+)\)', event_data_str)
+                            return tuple(int(x) for x in m.groups())
+                        def _g2(name):
+                            m = re.search(rf'{name}=\((\d+),(\d+)\)', event_data_str)
+                            return tuple(int(x) for x in m.groups())
+                        def _g3(name):
+                            m = re.search(rf'{name}=\((\d+),(\d+),(\d+)\)', event_data_str)
+                            return tuple(int(x) for x in m.groups())
+                        def _gn(name):
+                            return re.search(rf'{name}=([\d.]+)', event_data_str).group(1)
+                        def _gs(name):
+                            return re.search(rf'{name}=(\w+)', event_data_str).group(1)
+                        events.append(FindFishingSpotEvent(
+                            region=_g4('region'),
+                            color=_g3('color'), tol=int(_gn('tol')),
+                            timeout=float(_gn('timeout')),
+                            char=_g2('char'), button=_gs('button'),
+                            delay=delay,
+                        ))
                 except Exception as e:
                     logger.warning(f"Error parsing line: {line} - {e}")
                     continue
@@ -205,6 +258,17 @@ class Writer:
                 )
             elif isinstance(event, LogEvent):
                 f.write(f"log|{event.message}|{event.delay}\n")
+            elif isinstance(event, FindFishingSpotEvent):
+                rg, co = event.region, event.color
+                f.write(
+                    f"find_fishing_spot|"
+                    f"region=({rg[0]},{rg[1]},{rg[2]},{rg[3]});"
+                    f"color=({co[0]},{co[1]},{co[2]});"
+                    f"tol={event.tol};timeout={event.timeout};"
+                    f"char=({event.char[0]},{event.char[1]});"
+                    f"button={event.button}"
+                    f"|{event.delay}\n"
+                )
 
 class Editor:
     def scale_timing(self, events, scale_factor):
@@ -380,12 +444,12 @@ class Player:
             try:
                 self._execute_recursive(events)
             except _PixelTimeout as e:
-                sys.stdout.write(f"\n[TIMEOUT] {e} — restarting iteration\n")
+                sys.stdout.write(f"\n[{_ts()}][TIMEOUT] {e} — restarting iteration\n")
                 sys.stdout.flush()
                 try:
                     self._execute_recursive(events)
                 except _PixelTimeout as e2:
-                    sys.stdout.write(f"\n[TIMEOUT] {e2} on restart — stopping playback\n")
+                    sys.stdout.write(f"\n[{_ts()}][TIMEOUT] {e2} on restart — stopping playback\n")
                     sys.stdout.flush()
                     self.playing = False
                     break
@@ -466,14 +530,20 @@ class Player:
                 else: self.keyboard.release(keyboard.Key.space)
             elif isinstance(event, WaitPixelEvent):
                 self._wait_pixel(event)
+            elif isinstance(event, WaitPixelsEvent):
+                self._wait_pixels(event)
+            elif isinstance(event, FindFishingSpotEvent):
+                self._find_fishing_spot(event)
             elif isinstance(event, LogEvent):
-                sys.stdout.write(f"\r\033[K[LOG] {event.message}\n")
+                sys.stdout.write(f"\r\033[K[{_ts()}][LOG] {event.message}\n")
                 sys.stdout.flush()
 
             self._event_count += 1
-            rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
-            actual_delay = max(0, event.delay * (1 + rand_delay))
-            time.sleep(actual_delay)
+            # FindFishingSpotEvent consumes its delay internally (pre-click settle)
+            if not isinstance(event, FindFishingSpotEvent):
+                rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
+                actual_delay = max(0, event.delay * (1 + rand_delay))
+                time.sleep(actual_delay)
 
     def _wait_pixel(self, event):
         try:
@@ -501,6 +571,98 @@ class Player:
             f"wait_pixel timed out after {event.timeout}s "
             f"at ({event.x}, {event.y}) target=({event.r},{event.g},{event.b})"
         )
+
+    def _find_fishing_spot(self, event):
+        try:
+            import mss as _mss
+        except ImportError:
+            logger.error("find_fishing_spot requires mss: pip install mss")
+            return
+
+        r_t, g_t, b_t = event.color
+        rx1, ry1, rx2, ry2 = event.region
+        reg_mon = {"left": rx1, "top": ry1, "width": rx2 - rx1, "height": ry2 - ry1}
+        deadline = time.time() + event.timeout
+
+        with _mss.MSS() as sct:
+            while time.time() < deadline and self.playing:
+                spots = self._find_color_clusters(sct, reg_mon, rx1, ry1, r_t, g_t, b_t, event.tol)
+                if spots:
+                    cx, cy = event.char
+                    tx, ty = min(spots, key=lambda p: (p[0]-cx)**2 + (p[1]-cy)**2)
+                    tx += random.uniform(-3, 3)
+                    ty += random.uniform(-3, 3)
+                    btn = mouse.Button.left if event.button == 'left' else mouse.Button.right
+                    self.mouse.position = (tx, ty)
+                    # front-load delay: let cursor settle before clicking
+                    rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
+                    time.sleep(max(0, event.delay * (1 + rand_delay)))
+                    self.mouse.press(btn)
+                    time.sleep(0.05)
+                    self.mouse.release(btn)
+                    sys.stdout.write(f"\n[{_ts()}][FISH] Clicked spot at ({int(tx)},{int(ty)}), {len(spots)} available\n")
+                    sys.stdout.flush()
+                    return
+                time.sleep(0.2)
+
+        raise _PixelTimeout(f"find_fishing_spot: no spot found after {event.timeout}s in {event.region}")
+
+    def _color_in_region(self, sct, monitor, r_t, g_t, b_t, tol, stride=4):
+        """True if any pixel in region matches color within tolerance."""
+        shot = sct.grab(monitor)
+        raw, w, h = shot.raw, shot.width, shot.height
+        for py in range(0, h, stride):
+            row = py * w
+            for px in range(0, w, stride):
+                idx = (row + px) * 4
+                if (abs(raw[idx+2] - r_t) <= tol and
+                        abs(raw[idx+1] - g_t) <= tol and
+                        abs(raw[idx]   - b_t) <= tol):
+                    return True
+        return False
+
+    def _find_color_clusters(self, sct, monitor, off_x, off_y, r_t, g_t, b_t, tol, stride=2):
+        """Returns list of (x, y) bounding-box centers per cluster in screen coords."""
+        shot = sct.grab(monitor)
+        raw, w, h = shot.raw, shot.width, shot.height
+
+        matches = []
+        for py in range(0, h, stride):
+            row = py * w
+            for px in range(0, w, stride):
+                idx = (row + px) * 4
+                if (abs(raw[idx+2] - r_t) <= tol and
+                        abs(raw[idx+1] - g_t) <= tol and
+                        abs(raw[idx]   - b_t) <= tol):
+                    matches.append((px + off_x, py + off_y))
+
+        if not matches:
+            return []
+
+        # Group pixels within CLUSTER_DIST of cluster centroid
+        CLUSTER_DIST = 40
+        clusters = []
+        for point in matches:
+            placed = False
+            for cluster in clusters:
+                cx = sum(p[0] for p in cluster) // len(cluster)
+                cy = sum(p[1] for p in cluster) // len(cluster)
+                if abs(point[0] - cx) <= CLUSTER_DIST and abs(point[1] - cy) <= CLUSTER_DIST:
+                    cluster.append(point)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([point])
+
+        # Bounding box center per cluster — robust for thin rhombus outlines
+        # where pixel density is uneven across the 4 sides
+        return [
+            (
+                (min(p[0] for p in c) + max(p[0] for p in c)) // 2,
+                (min(p[1] for p in c) + max(p[1] for p in c)) // 2,
+            )
+            for c in clusters
+        ]
 
     def _dry_run_recursive(self, events, level=0):
         indent = '  ' * level
