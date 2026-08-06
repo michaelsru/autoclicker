@@ -47,6 +47,32 @@ class LoopEvent:
     events: list
 
 @dataclass(slots=True)
+class SetTimerEvent:
+    """Sets or resets a named timer to current timestamp (creates if missing, resets if existing)."""
+    name: str
+    delay: float
+
+@dataclass(slots=True)
+class CheckTimerEvent:
+    """Runs inner events if elapsed time since timer was set >= duration (or if timer was never set)."""
+    name: str
+    duration: float
+    events: list
+    delay: float
+
+@dataclass(slots=True)
+class CheckPixelEvent:
+    """Runs inner events only if pixel at (x,y) matches (r,g,b) within tolerance."""
+    x: int
+    y: int
+    r: int
+    g: int
+    b: int
+    tolerance: int
+    events: list
+    delay: float
+
+@dataclass(slots=True)
 class WaitPixelEvent:
     x: int
     y: int
@@ -101,7 +127,7 @@ class _PixelTimeout(Exception):
 # --- Classes ---
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format='%(asctime)s %(levelname)s:%(name)s:%(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
 )
@@ -175,6 +201,81 @@ class Reader:
                     else:
                         logger.warning(f"Syntax error on loop command: {line}")
 
+            elif line.startswith('check_timer'):
+                # Supported formats:
+                #   check_timer|(name, duration)|delay {
+                #   check_timer|name, duration|delay
+                #   {
+                header_line = line.rstrip()
+                has_brace = header_line.endswith('{')
+                if has_brace:
+                    header_line = header_line[:-1].rstrip()
+
+                try:
+                    parts = header_line.split('|')
+                    data_str = parts[1].strip(' ()')
+                    subparts = [p.strip() for p in data_str.split(',')]
+                    name = subparts[0]
+                    duration = float(subparts[1])
+                    delay = float(parts[2].strip()) if len(parts) > 2 else 0.0
+
+                    if not has_brace:
+                        j = i
+                        while j < len(lines) and not lines[j].strip():
+                            j += 1
+                        if j < len(lines) and lines[j].strip() == '{':
+                            i = j + 1
+                        else:
+                            logger.warning(f"check_timer missing '{{': {line}")
+                            continue
+
+                    block_events, new_i = self._parse_lines(lines, i, indent_level + 1, loaded_files)
+                    i = new_i
+                    events.append(CheckTimerEvent(
+                        name=name, duration=duration,
+                        events=block_events, delay=delay,
+                    ))
+                except Exception as e:
+                    logger.warning(f"Syntax error on check_timer: {line} — {e}")
+
+            elif line.startswith('check_pixel'):
+                # Supported formats:
+                #   check_pixel|(x,y,r,g,b,tol)|delay {   ← { same line
+                #   check_pixel|(x,y,r,g,b,tol)|delay     ← { next line
+                #   (extra numbers like timeout are ignored)
+                header_line = line.rstrip()
+                has_brace = header_line.endswith('{')
+                if has_brace:
+                    header_line = header_line[:-1].rstrip()
+
+                try:
+                    parts = header_line.split('|')
+                    # parts: ['check_pixel', '(x,y,r,g,b,tol[,...])', 'delay']
+                    nums = list(map(float, re.findall(r'[\d.]+', parts[1])))
+                    delay = float(parts[2].strip()) if len(parts) > 2 else 0.0
+
+                    if not has_brace:
+                        # look ahead for { on next non-blank line
+                        j = i
+                        while j < len(lines) and not lines[j].strip():
+                            j += 1
+                        if j < len(lines) and lines[j].strip() == '{':
+                            i = j + 1  # consume the { line
+                        else:
+                            logger.warning(f"check_pixel missing '{{': {line}")
+                            continue
+
+                    block_events, new_i = self._parse_lines(lines, i, indent_level + 1, loaded_files)
+                    i = new_i
+                    events.append(CheckPixelEvent(
+                        x=int(nums[0]), y=int(nums[1]),
+                        r=int(nums[2]), g=int(nums[3]), b=int(nums[4]),
+                        tolerance=int(nums[5]),  # nums[6+] (e.g. timeout) ignored
+                        events=block_events, delay=delay,
+                    ))
+                except Exception as e:
+                    logger.warning(f"Syntax error on check_pixel: {line} — {e}")
+
             else:
                 try:
                     event_type, event_data_str, delay_str = line.split('|')
@@ -183,6 +284,8 @@ class Reader:
                     if event_type == 'move':
                         nums = re.findall(r'([-+]?\d*\.?\d+)', event_data_str)
                         events.append(MoveEvent(x=float(nums[0]), y=float(nums[1]), delay=delay))
+                    elif event_type in ('set_timer', 'reset_timer'):
+                        events.append(SetTimerEvent(name=event_data_str.strip(' ()'), delay=delay))
                     elif event_type == 'click':
                         match = re.match(r"\(([-+]?\d*\.\d+|\d+), ([-+]?\d*\.\d+|\d+), <Button\.(\w+): .+>, (True|False)\)", event_data_str)
                         if match:
@@ -263,11 +366,26 @@ class Writer:
             logger.warning(f"Error saving file {filename}: {e}")
 
     def _write_events(self, f, events, indent_level=0):
-        indent = ""
+        indent = "  " * indent_level
 
         for event in events:
             if isinstance(event, LoopEvent):
                 f.write(f"{indent}loop {event.count} {{\n")
+                self._write_events(f, event.events, indent_level + 1)
+                f.write(f"{indent}}}\n")
+            elif isinstance(event, SetTimerEvent):
+                f.write(f"{indent}set_timer|{event.name}|{event.delay}\n")
+            elif isinstance(event, CheckTimerEvent):
+                f.write(
+                    f"{indent}check_timer|({event.name}, {event.duration})|{event.delay} {{\n"
+                )
+                self._write_events(f, event.events, indent_level + 1)
+                f.write(f"{indent}}}\n")
+            elif isinstance(event, CheckPixelEvent):
+                f.write(
+                    f"{indent}check_pixel|({event.x}, {event.y}, {event.r}, "
+                    f"{event.g}, {event.b}, {event.tolerance})|{event.delay} {{\n"
+                )
                 self._write_events(f, event.events, indent_level + 1)
                 f.write(f"{indent}}}\n")
             elif isinstance(event, MoveEvent):
@@ -295,9 +413,7 @@ class Writer:
                     f"tol={event.tol};timeout={event.timeout};"
                     + (f"char=({event.char[0]},{event.char[1]});" if event.char else "")
                     + (f"button={event.button};" if event.button else "")
-                    + f"move_time={event.move_time};"
-                    f"bezier_ratio={event.bezier_ratio}"
-                    f"|{event.delay}\n"
+                    + f"move_time={event.move_time};bezier_ratio={event.bezier_ratio}|{event.delay}\n"
                 )
             elif isinstance(event, RandomWaitEvent):
                 f.write(f"random_wait|({event.min_t}, {event.max_t})|{event.delay}\n")
@@ -308,6 +424,17 @@ class Editor:
         for event in events:
             if isinstance(event, LoopEvent):
                 self.scale_timing(event.events, scale_factor)
+            elif isinstance(event, CheckTimerEvent):
+                event.delay *= scale_factor
+                self.scale_timing(event.events, scale_factor)
+            elif isinstance(event, SetTimerEvent):
+                event.delay *= scale_factor
+            elif isinstance(event, CheckPixelEvent):
+                event.delay *= scale_factor
+                self.scale_timing(event.events, scale_factor)
+            elif isinstance(event, FindFishingSpotEvent):
+                event.delay *= scale_factor
+                event.move_time *= scale_factor
             else:
                 event.delay *= scale_factor
         return events
@@ -321,6 +448,17 @@ class Editor:
         for event in events:
             if isinstance(event, LoopEvent):
                 total += self._calculate_total_seconds(event.events) * event.count
+            elif isinstance(event, CheckTimerEvent):
+                total += event.delay + self._calculate_total_seconds(event.events)
+            elif isinstance(event, SetTimerEvent):
+                total += event.delay
+            elif isinstance(event, CheckPixelEvent):
+                # inner events may or may not run; count delay + inner as best-case
+                total += event.delay + self._calculate_total_seconds(event.events)
+            elif isinstance(event, FindFishingSpotEvent):
+                total += event.delay + event.move_time
+            elif isinstance(event, RandomWaitEvent):
+                total += event.delay + (event.min_t + event.max_t) / 2
             else:
                 total += event.delay
         return total
@@ -435,11 +573,13 @@ class Player:
         self.verbose = verbose
         self.playing = False
         self.thread = None
+        self.timers = {}
 
     def play(self, events, loop_count=1, dry_run=False):
         if self.playing: return
         print("Starting Playback!")
         self.playing = True
+        self.timers = {}
         
         if dry_run:
             logger.info("--- DRY RUN START ---")
@@ -448,11 +588,11 @@ class Player:
             self.playing = False
             return
 
-        self.thread = threading.Thread(target=self._play_loop, args=(events, loop_count), daemon=True)
-        self.thread.start()
         self._start_time = time.time()
         self._iteration = 0
         self._event_count = 0
+        self.thread = threading.Thread(target=self._play_loop, args=(events, loop_count), daemon=True)
+        self.thread.start()
 
     def stop(self):
         if not self.playing: return
@@ -476,13 +616,15 @@ class Player:
             try:
                 self._execute_recursive(events)
             except _PixelTimeout as e:
-                sys.stdout.write(f"\n[{_ts()}][TIMEOUT] {e} — restarting iteration\n")
-                sys.stdout.flush()
+                if self.verbose:
+                    sys.stdout.write(f"\n[{_ts()}][TIMEOUT] {e} — restarting iteration\n")
+                    sys.stdout.flush()
                 try:
                     self._execute_recursive(events)
                 except _PixelTimeout as e2:
-                    sys.stdout.write(f"\n[{_ts()}][TIMEOUT] {e2} on restart — stopping playback\n")
-                    sys.stdout.flush()
+                    if self.verbose:
+                        sys.stdout.write(f"\n[{_ts()}][TIMEOUT] {e2} on restart — stopping playback\n")
+                        sys.stdout.flush()
                     self.playing = False
                     break
             self._iteration += 1
@@ -490,6 +632,12 @@ class Player:
             elapsed = time.time() - self._start_time
             iter_time = time.time() - iter_start
             rate = self._iteration / elapsed if elapsed > 0 else 0
+
+            now = time.time()
+            timer_str = ""
+            if self.timers:
+                t_parts = [f"{k}:{now - v:.1f}s" for k, v in self.timers.items()]
+                timer_str = f"  timers={{{', '.join(t_parts)}}}"
 
             elapsed_str = self._format_time(elapsed)
             if total is not None:
@@ -499,13 +647,13 @@ class Player:
                 line = (
                     f"iter={done}/{total}  elapsed={elapsed_str}  "
                     f"iter_time={iter_time:.2f}s  rate={rate:.2f}/s  "
-                    f"eta={eta_str}  events={self._event_count}"
+                    f"eta={eta_str}  events={self._event_count}{timer_str}"
                 )
             else:
                 line = (
                     f"iter={self._iteration}  elapsed={elapsed_str}  "
                     f"iter_time={iter_time:.2f}s  rate={rate:.2f}/s  "
-                    f"events={self._event_count}"
+                    f"events={self._event_count}{timer_str}"
                 )
 
             sys.stdout.write(f"\r\033[K{line}")
@@ -545,6 +693,61 @@ class Player:
                     self._execute_recursive(event.events, level + 1)
                 continue
 
+            if isinstance(event, SetTimerEvent):
+                self.timers[event.name] = time.time()
+                if self.verbose:
+                    sys.stdout.write(f"\r\033[K[{_ts()}][TIMER] set '{event.name}'\n")
+                    sys.stdout.flush()
+                rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
+                time.sleep(max(0, event.delay * (1 + rand_delay)))
+                continue
+
+            if isinstance(event, CheckTimerEvent):
+                now = time.time()
+                start_t = self.timers.get(event.name)
+                if start_t is None:
+                    matched = True
+                    sys.stdout.write(f"\r\033[K[{_ts()}][TIMER] '{event.name}' not set yet — entering conditional\n")
+                    sys.stdout.flush()
+                else:
+                    elapsed = now - start_t
+                    matched = elapsed >= event.duration
+                    if self.verbose:
+                        status = "PASS" if matched else "SKIP"
+                        sys.stdout.write(f"\r\033[K[{_ts()}][TIMER] check '{event.name}' ({elapsed:.1f}s / {event.duration}s) — {status}\n")
+                        sys.stdout.flush()
+
+                if matched:
+                    self._execute_recursive(event.events, level + 1)
+
+                rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
+                time.sleep(max(0, event.delay * (1 + rand_delay)))
+                continue
+
+            if isinstance(event, CheckPixelEvent):
+                try:
+                    import mss as _mss
+                    with _mss.MSS() as sct:
+                        shot = sct.grab({"left": event.x, "top": event.y, "width": 1, "height": 1})
+                        pr, pg, pb = shot.raw[2], shot.raw[1], shot.raw[0]  # BGRA
+                    matched = (
+                        abs(pr - event.r) <= event.tolerance and
+                        abs(pg - event.g) <= event.tolerance and
+                        abs(pb - event.b) <= event.tolerance
+                    )
+                except Exception as e:
+                    logger.warning(f"check_pixel grab failed: {e}")
+                    matched = False
+                if self.verbose:
+                    status = "PASS" if matched else "SKIP"
+                    sys.stdout.write(f"\r\033[K[{_ts()}][CHECK] ({event.x},{event.y}) rgb=({pr},{pg},{pb}) — {status}\n")
+                    sys.stdout.flush()
+                if matched:
+                    self._execute_recursive(event.events, level + 1)
+                rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
+                time.sleep(max(0, event.delay * (1 + rand_delay)))
+                continue
+
             if self.verbose:
                 print(f"{indent}Playing: {type(event).__name__}, delay: {event.delay}")
 
@@ -568,12 +771,14 @@ class Player:
                 self._find_fishing_spot(event)
             elif isinstance(event, RandomWaitEvent):
                 wait = random.uniform(event.min_t, event.max_t)
-                sys.stdout.write(f"\r\033[K[{_ts()}][WAIT] sleeping {wait:.2f}s ({event.min_t}-{event.max_t}s)\n")
-                sys.stdout.flush()
+                if self.verbose:
+                    sys.stdout.write(f"\r\033[K[{_ts()}][WAIT] sleeping {wait:.2f}s ({event.min_t}-{event.max_t}s)\n")
+                    sys.stdout.flush()
                 time.sleep(wait)
             elif isinstance(event, LogEvent):
-                sys.stdout.write(f"\r\033[K[{_ts()}][LOG] {event.message}\n")
-                sys.stdout.flush()
+                if self.verbose:
+                    sys.stdout.write(f"\r\033[K[{_ts()}][LOG] {event.message}\n")
+                    sys.stdout.flush()
 
             self._event_count += 1
             # FindFishingSpotEvent consumes its delay internally (pre-click settle)
@@ -662,6 +867,7 @@ class Player:
             import mss as _mss
         except ImportError:
             logger.error("find_fishing_spot requires mss: pip install mss")
+            self.playing = False  # #3: halt rather than silently skip
             return
 
         r_t, g_t, b_t = event.color
@@ -679,7 +885,11 @@ class Player:
                         tx, ty = random.choice(spots)
                     tx += random.uniform(-self.position_threshold, self.position_threshold)
                     ty += random.uniform(-self.position_threshold, self.position_threshold)
-                    btn = mouse.Button.left if event.button == 'left' else mouse.Button.right if event.button else None
+                    # #4: explicit dict lookup — typos get None + warning, not silent right-click
+                    _BTN_MAP = {'left': mouse.Button.left, 'right': mouse.Button.right}
+                    btn = _BTN_MAP.get(event.button) if event.button else None
+                    if event.button and btn is None:
+                        logger.warning(f"find_fishing_spot: unknown button={event.button!r}, skipping click")
                     x0, y0 = self.mouse.position
                     rand_move = random.uniform(-self.delay_threshold, self.delay_threshold)
                     actual_move_time = max(0, event.move_time * (1 + rand_move))
@@ -691,12 +901,16 @@ class Player:
                         self.mouse.press(btn)
                         time.sleep(0.05)
                         self.mouse.release(btn)
-                    action = f"clicked({event.button})" if btn is not None else "moved"
-                    sys.stdout.write(f"\n[{_ts()}][FISH] {action} to ({int(tx)},{int(ty)}), {len(spots)} spot(s) available\n")
-                    sys.stdout.flush()
+                    if self.verbose:
+                        action = f"clicked({event.button})" if btn is not None else "moved"
+                        sys.stdout.write(f"\n[{_ts()}][FISH] {action} to ({int(tx)},{int(ty)}), {len(spots)} spot(s) available\n")
+                        sys.stdout.flush()
                     return
                 time.sleep(0.2)
 
+        # #2: abort (self.playing=False) must not be treated as a timeout
+        if not self.playing:
+            return
         raise _PixelTimeout(f"find_fishing_spot: no spot found after {event.timeout}s in {event.region}")
 
     def _color_in_region(self, sct, monitor, r_t, g_t, b_t, tol, stride=4):
@@ -714,47 +928,46 @@ class Player:
         return False
 
     def _find_color_clusters(self, sct, monitor, off_x, off_y, r_t, g_t, b_t, tol, stride=2):
-        """Returns list of (x, y) bounding-box centers per cluster in screen coords."""
+        """Returns list of (x, y) bounding-box centers per cluster in screen coords.
+
+        Each cluster: [sum_x, sum_y, count, min_x, max_x, min_y, max_y].
+        Centroid = sum/count  →  O(1) lookup.
+        Bbox update           →  O(1) per point.
+        Overall: O(N·M), N=matching pixels, M=cluster count (typically 1-5).
+        """
         shot = sct.grab(monitor)
         raw, w, h = shot.raw, shot.width, shot.height
+        CLUSTER_DIST = 40
+        clusters = []  # [sum_x, sum_y, count, min_x, max_x, min_y, max_y]
 
-        matches = []
         for py in range(0, h, stride):
             row = py * w
             for px in range(0, w, stride):
                 idx = (row + px) * 4
-                if (abs(raw[idx+2] - r_t) <= tol and
+                if not (abs(raw[idx+2] - r_t) <= tol and
                         abs(raw[idx+1] - g_t) <= tol and
                         abs(raw[idx]   - b_t) <= tol):
-                    matches.append((px + off_x, py + off_y))
+                    continue
 
-        if not matches:
-            return []
+                gx, gy = px + off_x, py + off_y
+                placed = False
+                for c in clusters:
+                    # O(1) centroid — no recompute over all cluster points
+                    if (abs(gx - c[0] / c[2]) <= CLUSTER_DIST and
+                            abs(gy - c[1] / c[2]) <= CLUSTER_DIST):
+                        c[0] += gx; c[1] += gy; c[2] += 1
+                        if gx < c[3]: c[3] = gx  # min_x
+                        if gx > c[4]: c[4] = gx  # max_x
+                        if gy < c[5]: c[5] = gy  # min_y
+                        if gy > c[6]: c[6] = gy  # max_y
+                        placed = True
+                        break
+                if not placed:
+                    clusters.append([gx, gy, 1, gx, gx, gy, gy])
 
-        # Group pixels within CLUSTER_DIST of cluster centroid
-        CLUSTER_DIST = 40
-        clusters = []
-        for point in matches:
-            placed = False
-            for cluster in clusters:
-                cx = sum(p[0] for p in cluster) // len(cluster)
-                cy = sum(p[1] for p in cluster) // len(cluster)
-                if abs(point[0] - cx) <= CLUSTER_DIST and abs(point[1] - cy) <= CLUSTER_DIST:
-                    cluster.append(point)
-                    placed = True
-                    break
-            if not placed:
-                clusters.append([point])
+        # Bounding-box center: stable even with uneven perimeter sampling
+        return [((c[3] + c[4]) // 2, (c[5] + c[6]) // 2) for c in clusters]
 
-        # Bounding box center per cluster — robust for thin rhombus outlines
-        # where pixel density is uneven across the 4 sides
-        return [
-            (
-                (min(p[0] for p in c) + max(p[0] for p in c)) // 2,
-                (min(p[1] for p in c) + max(p[1] for p in c)) // 2,
-            )
-            for c in clusters
-        ]
 
     def _dry_run_recursive(self, events, level=0):
         indent = '  ' * level
@@ -764,13 +977,34 @@ class Player:
                 self._dry_run_recursive(event.events, level + 1)
                 logger.info(f"{indent}}}")
 
+# --- Duration helpers ---
+
+def _parse_duration(s):
+    """Parse hh:mm:ss, mm:ss, or raw seconds into a float of seconds."""
+    parts = s.strip().split(':')
+    try:
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        return float(parts[0])
+    except ValueError:
+        raise ValueError(f"Invalid duration format {s!r} — use hh:mm:ss, mm:ss, or seconds")
+
+def _duration_stop(player, secs):
+    """Sleep for secs then stop the player (runs in a daemon thread)."""
+    time.sleep(secs)
+    if player.playing:
+        player.stop()
+
 # --- Main Application ---
 
 class AutoClickerApp:
     def __init__(self):
         self.parser = argparse.ArgumentParser()
         self.parser.add_argument('-g', '--granularity', type=float, default=0.01, help='Granularity for recording (s)')
-        self.parser.add_argument('-c', '--count', type=int, default=1, help='Loop count')
+        self.parser.add_argument('-c', '--count', type=int, default=1, help='Loop count (-1 = infinite)')
+        self.parser.add_argument('-t', '--time', type=str, default=None, help='Run duration hh:mm:ss (loops infinitely until time is up)')
         self.parser.add_argument('-d', '--delay_threshold', type=float, default=0, help='Delay Jitter (s)')
         self.parser.add_argument('-p', '--position_threshold', type=float, default=0, help='Position Jitter (px)')
         self.parser.add_argument('-f', '--file', type=str, default='mouse_events.txt', help='File to load/save')
@@ -779,6 +1013,9 @@ class AutoClickerApp:
         self.parser.add_argument('--dry-run', action='store_true', help='Dry run')
         self.parser.add_argument('--verbose', action='store_true', help='Print each event during playback')
         self.args = self.parser.parse_args()
+
+        if self.args.verbose:
+            logging.getLogger().setLevel(logging.INFO)
 
         self.reader = Reader()
         self.writer = Writer()
@@ -863,7 +1100,15 @@ class AutoClickerApp:
                 logger.info(f"total time: {self.editor.get_total_time(self.loaded_events)}")
 
             elif key.char in ['p', 'P'] and not self.player.playing and not self.recorder.recording:
-                self.player.play(self.loaded_events, loop_count=self.args.count)
+                loop_count = self.args.count
+                if self.args.time:
+                    loop_count = -1  # run until timer fires
+                self.player.play(self.loaded_events, loop_count=loop_count)
+                if self.args.time:
+                    secs = _parse_duration(self.args.time)
+                    print(f"Running for {self.args.time} ({secs:.0f}s)")
+                    t = threading.Thread(target=_duration_stop, args=(self.player, secs), daemon=True)
+                    t.start()
             
             elif key.char in ['e', 'E'] and self.player.playing:
                 self.player.stop()

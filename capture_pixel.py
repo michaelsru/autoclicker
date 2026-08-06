@@ -9,6 +9,8 @@ Usage:
 """
 
 import argparse
+import os
+import select
 import time
 import sys
 
@@ -29,11 +31,10 @@ def get_cursor_pos():
     return mouse.Controller().position
 
 
-def get_pixel(x, y):
-    with mss.MSS() as sct:
-        shot = sct.grab({"top": int(y), "left": int(x), "width": 1, "height": 1})
-        b, g, r = shot.raw[0], shot.raw[1], shot.raw[2]  # BGRA
-        return r, g, b
+def get_pixel(sct, x, y):
+    shot = sct.grab({"top": int(y), "left": int(x), "width": 1, "height": 1})
+    b, g, r = shot.raw[0], shot.raw[1], shot.raw[2]  # BGRA
+    return r, g, b
 
 
 def main():
@@ -48,24 +49,25 @@ def main():
     print(f"(tolerance={args.tolerance}, timeout={args.timeout}s)\n")
 
     try:
-        while True:
-            x, y = get_cursor_pos()
-            r, g, b = get_pixel(x, y)
-            sys.stdout.write(f"\r  pos=({int(x)}, {int(y)})  rgb=({r}, {g}, {b})   ")
-            sys.stdout.flush()
+        # open mss once for the session, not once per frame
+        with mss.MSS() as sct:
+            while True:
+                x, y = get_cursor_pos()
+                r, g, b = get_pixel(sct, x, y)
+                sys.stdout.write(f"\r  pos=({int(x)}, {int(y)})  rgb=({r}, {g}, {b})   ")
+                sys.stdout.flush()
 
-            # non-blocking check for ENTER — poll stdin
-            import select
-            if select.select([sys.stdin], [], [], 0)[0]:
-                sys.stdin.readline()
-                print()
-                line = (
-                    f"wait_pixel|({int(x)}, {int(y)}, {r}, {g}, {b}, "
-                    f"{args.tolerance}, {args.timeout})|0.0"
-                )
-                print(f"\nCaptured:\n  {line}\n")
+                # os.read drains available bytes without blocking on \n
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    os.read(sys.stdin.fileno(), 4096)
+                    print()
+                    line = (
+                        f"wait_pixel|({int(x)}, {int(y)}, {r}, {g}, {b}, "
+                        f"{args.tolerance}, {args.timeout})|0.0"
+                    )
+                    print(f"\nCaptured:\n  {line}\n")
 
-            time.sleep(0.05)
+                time.sleep(0.05)
 
     except KeyboardInterrupt:
         print("\nDone.")
