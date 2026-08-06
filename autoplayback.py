@@ -74,6 +74,12 @@ class WaitPixelsEvent:
     delay: float
 
 @dataclass(slots=True)
+class RandomWaitEvent:
+    min_t: float
+    max_t: float
+    delay: float
+
+@dataclass(slots=True)
 class FindFishingSpotEvent:
     """Scans `region` for tile-colored pixels, clusters into spots,
     clicks the one closest to `char`."""
@@ -198,6 +204,12 @@ class Reader:
                         ))
                     elif event_type == 'log':
                         events.append(LogEvent(message=event_data_str.strip(), delay=delay))
+                    elif event_type == 'random_wait':
+                        nums = re.findall(r'[\d.]+', event_data_str)
+                        events.append(RandomWaitEvent(
+                            min_t=float(nums[0]), max_t=float(nums[1]),
+                            delay=delay,
+                        ))
                     elif event_type == 'find_fishing_spot':
                         def _g4(name):
                             m = re.search(rf'{name}=\((\d+),(\d+),(\d+),(\d+)\)', event_data_str)
@@ -274,6 +286,8 @@ class Writer:
                     f"button={event.button};move_time={event.move_time}"
                     f"|{event.delay}\n"
                 )
+            elif isinstance(event, RandomWaitEvent):
+                f.write(f"random_wait|({event.min_t}, {event.max_t})|{event.delay}\n")
 
 class Editor:
     def scale_timing(self, events, scale_factor):
@@ -539,6 +553,11 @@ class Player:
                 self._wait_pixels(event)
             elif isinstance(event, FindFishingSpotEvent):
                 self._find_fishing_spot(event)
+            elif isinstance(event, RandomWaitEvent):
+                wait = random.uniform(event.min_t, event.max_t)
+                sys.stdout.write(f"\r\033[K[{_ts()}][WAIT] sleeping {wait:.2f}s ({event.min_t}-{event.max_t}s)\n")
+                sys.stdout.flush()
+                time.sleep(wait)
             elif isinstance(event, LogEvent):
                 sys.stdout.write(f"\r\033[K[{_ts()}][LOG] {event.message}\n")
                 sys.stdout.flush()
