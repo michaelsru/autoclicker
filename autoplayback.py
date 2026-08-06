@@ -87,8 +87,8 @@ class FindFishingSpotEvent:
     color: tuple     # (r,g,b)        — tile marker color
     tol: int         # per-channel tolerance
     timeout: float   # seconds to wait for a spot to appear
-    char: tuple      # (cx,cy)        — character screen pos for closest-spot selection
-    button: str      # 'left' | 'right'
+    char: tuple | None  # (cx,cy) for closest-spot; None = pick randomly
+    button: str | None  # 'left' | 'right' | None = move only, no click
     move_time: float # seconds to glide cursor to target (0 = instant)
     bezier_ratio: float  # 0.0–1.0: chance of Bézier arc vs overshoot path
     delay: float
@@ -228,11 +228,20 @@ class Reader:
                         def _gn_opt(name, default=0.0):
                             m = re.search(rf'{name}=([\d.]+)', event_data_str)
                             return float(m.group(1)) if m else default
+                        def _g2_opt(name):
+                            m = re.search(rf'{name}=\((\d+),(\d+)\)', event_data_str)
+                            return tuple(int(x) for x in m.groups()) if m else None
+                        def _gs_opt(name):
+                            # require key to be preceded by start/semicolon and
+                            # value followed by semicolon/pipe/end to avoid
+                            # partial matches in other key names
+                            m = re.search(rf'(?:^|;){name}=(\w+)(?:;|$)', event_data_str)
+                            return m.group(1) if m else None
                         events.append(FindFishingSpotEvent(
                             region=_g4('region'),
                             color=_g3('color'), tol=int(_gn('tol')),
                             timeout=float(_gn('timeout')),
-                            char=_g2('char'), button=_gs('button'),
+                            char=_g2_opt('char'), button=_gs_opt('button'),
                             move_time=_gn_opt('move_time', 0.0),
                             bezier_ratio=_gn_opt('bezier_ratio', 0.7),
                             delay=delay,
@@ -284,8 +293,9 @@ class Writer:
                     f"region=({rg[0]},{rg[1]},{rg[2]},{rg[3]});"
                     f"color=({co[0]},{co[1]},{co[2]});"
                     f"tol={event.tol};timeout={event.timeout};"
-                    f"char=({event.char[0]},{event.char[1]});"
-                    f"button={event.button};move_time={event.move_time};"
+                    + (f"char=({event.char[0]},{event.char[1]});" if event.char else "")
+                    + (f"button={event.button};" if event.button else "")
+                    + f"move_time={event.move_time};"
                     f"bezier_ratio={event.bezier_ratio}"
                     f"|{event.delay}\n"
                 )
@@ -663,11 +673,13 @@ class Player:
             while time.time() < deadline and self.playing:
                 spots = self._find_color_clusters(sct, reg_mon, rx1, ry1, r_t, g_t, b_t, event.tol)
                 if spots:
-                    cx, cy = event.char
-                    tx, ty = min(spots, key=lambda p: (p[0]-cx)**2 + (p[1]-cy)**2)
+                    if event.char:
+                        tx, ty = min(spots, key=lambda p: (p[0]-event.char[0])**2 + (p[1]-event.char[1])**2)
+                    else:
+                        tx, ty = random.choice(spots)
                     tx += random.uniform(-self.position_threshold, self.position_threshold)
                     ty += random.uniform(-self.position_threshold, self.position_threshold)
-                    btn = mouse.Button.left if event.button == 'left' else mouse.Button.right
+                    btn = mouse.Button.left if event.button == 'left' else mouse.Button.right if event.button else None
                     x0, y0 = self.mouse.position
                     rand_move = random.uniform(-self.delay_threshold, self.delay_threshold)
                     actual_move_time = max(0, event.move_time * (1 + rand_move))
@@ -675,10 +687,12 @@ class Player:
                     # front-load delay: let cursor settle before clicking
                     rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
                     time.sleep(max(0, event.delay * (1 + rand_delay)))
-                    self.mouse.press(btn)
-                    time.sleep(0.05)
-                    self.mouse.release(btn)
-                    sys.stdout.write(f"\n[{_ts()}][FISH] Clicked spot at ({int(tx)},{int(ty)}), {len(spots)} available\n")
+                    if btn is not None:
+                        self.mouse.press(btn)
+                        time.sleep(0.05)
+                        self.mouse.release(btn)
+                    action = f"clicked({event.button})" if btn is not None else "moved"
+                    sys.stdout.write(f"\n[{_ts()}][FISH] {action} to ({int(tx)},{int(ty)}), {len(spots)} spot(s) available\n")
                     sys.stdout.flush()
                     return
                 time.sleep(0.2)
