@@ -90,6 +90,7 @@ class FindFishingSpotEvent:
     char: tuple      # (cx,cy)        — character screen pos for closest-spot selection
     button: str      # 'left' | 'right'
     move_time: float # seconds to glide cursor to target (0 = instant)
+    bezier_ratio: float  # 0.0–1.0: chance of Bézier arc vs overshoot path
     delay: float
 
 # --- Exceptions ---
@@ -233,6 +234,7 @@ class Reader:
                             timeout=float(_gn('timeout')),
                             char=_g2('char'), button=_gs('button'),
                             move_time=_gn_opt('move_time', 0.0),
+                            bezier_ratio=_gn_opt('bezier_ratio', 0.7),
                             delay=delay,
                         ))
                 except Exception as e:
@@ -283,7 +285,8 @@ class Writer:
                     f"color=({co[0]},{co[1]},{co[2]});"
                     f"tol={event.tol};timeout={event.timeout};"
                     f"char=({event.char[0]},{event.char[1]});"
-                    f"button={event.button};move_time={event.move_time}"
+                    f"button={event.button};move_time={event.move_time};"
+                    f"bezier_ratio={event.bezier_ratio}"
                     f"|{event.delay}\n"
                 )
             elif isinstance(event, RandomWaitEvent):
@@ -596,19 +599,53 @@ class Player:
             f"at ({event.x}, {event.y}) target=({event.r},{event.g},{event.b})"
         )
 
-    def _smooth_move(self, x0, y0, x1, y1, move_time):
+    def _smooth_move(self, x0, y0, x1, y1, move_time, bezier_ratio=0.7):
         """Move mouse from (x0,y0) to (x1,y1) over move_time seconds.
-        Uses smoothstep easing. move_time=0 → instant jump."""
+        Randomly chooses between a cubic Bézier arc and an overshoot path.
+        bezier_ratio=1.0 always Bézier, 0.0 always overshoot. move_time=0 → instant."""
         if move_time <= 0:
             self.mouse.position = (x1, y1)
             return
+
         steps = max(10, int(move_time * 60))  # ~60fps
         dt = move_time / steps
-        for i in range(1, steps + 1):
-            t = i / steps
-            t_e = t * t * (3 - 2 * t)  # smoothstep
-            self.mouse.position = (x0 + (x1 - x0) * t_e, y0 + (y1 - y0) * t_e)
-            time.sleep(dt)
+
+        if random.random() < bezier_ratio:
+            # ── Cubic Bézier arc ──────────────────────────────────────────
+            # Two control points offset perpendicular to the straight path,
+            # creating a natural arc. Arc amount is randomised per move.
+            dx, dy = x1 - x0, y1 - y0
+            dist = math.sqrt(dx*dx + dy*dy) or 1.0
+            px, py = -dy / dist, dx / dist          # perpendicular unit
+            arc = random.uniform(0.1, 0.4) * dist * random.choice([-1, 1])
+            cp1 = (x0 + dx*0.25 + px*arc, y0 + dy*0.25 + py*arc)
+            cp2 = (x0 + dx*0.75 + px*arc, y0 + dy*0.75 + py*arc)
+            for i in range(1, steps + 1):
+                t = i / steps
+                s = t * t * (3 - 2 * t)             # smoothstep speed profile
+                u = 1 - s
+                bx = u**3*x0 + 3*u**2*s*cp1[0] + 3*u*s**2*cp2[0] + s**3*x1
+                by = u**3*y0 + 3*u**2*s*cp1[1] + 3*u*s**2*cp2[1] + s**3*y1
+                self.mouse.position = (bx, by)
+                time.sleep(dt)
+        else:
+            # ── Overshoot + ease-back ─────────────────────────────────────
+            # Move ~5-15% past the target, then ease back to the real target.
+            overshoot = random.uniform(0.05, 0.15)
+            ox = x1 + (x1 - x0) * overshoot
+            oy = y1 + (y1 - y0) * overshoot
+            phase1 = max(1, int(steps * 0.75))      # 75% of time to reach overshoot
+            phase2 = max(1, steps - phase1)          # 25% to ease back
+            for i in range(1, phase1 + 1):
+                t = i / phase1
+                s = t * t * (3 - 2 * t)
+                self.mouse.position = (x0 + (ox - x0)*s, y0 + (oy - y0)*s)
+                time.sleep(dt)
+            for i in range(1, phase2 + 1):
+                t = i / phase2
+                s = t * t * (3 - 2 * t)
+                self.mouse.position = (ox + (x1 - ox)*s, oy + (y1 - oy)*s)
+                time.sleep(dt)
 
     def _find_fishing_spot(self, event):
         try:
@@ -634,7 +671,7 @@ class Player:
                     x0, y0 = self.mouse.position
                     rand_move = random.uniform(-self.delay_threshold, self.delay_threshold)
                     actual_move_time = max(0, event.move_time * (1 + rand_move))
-                    self._smooth_move(x0, y0, tx, ty, actual_move_time)
+                    self._smooth_move(x0, y0, tx, ty, actual_move_time, event.bezier_ratio)
                     # front-load delay: let cursor settle before clicking
                     rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
                     time.sleep(max(0, event.delay * (1 + rand_delay)))

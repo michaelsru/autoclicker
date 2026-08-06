@@ -60,10 +60,11 @@ def wait_enter(prompt):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--tol',       type=int,   default=20,   help='Color tolerance (default 20)')
-    parser.add_argument('--timeout',   type=float, default=15.0, help='Search timeout in seconds (default 15)')
-    parser.add_argument('--button',    type=str,   default='left', choices=['left', 'right'])
-    parser.add_argument('--move-time', type=float, default=0.0,  help='Mouse glide time in seconds (default 0 = instant)')
+    parser.add_argument('--tol',          type=int,   default=20,   help='Color tolerance (default 20)')
+    parser.add_argument('--timeout',      type=float, default=15.0, help='Search timeout in seconds (default 15)')
+    parser.add_argument('--button',       type=str,   default='left', choices=['left', 'right'])
+    parser.add_argument('--move-time',    type=float, default=0.0,  help='Mouse glide time in seconds (default 0 = instant)')
+    parser.add_argument('--bezier-ratio', type=float, default=0.7,  help='Bézier vs overshoot ratio 0-1 (default 0.7)')
     args = parser.parse_args()
 
     print("=== find_fishing_spot event builder ===")
@@ -83,7 +84,8 @@ def main():
         f"color=({r},{g},{b});"
         f"tol={args.tol};timeout={args.timeout};"
         f"char=({cx},{cy});"
-        f"button={args.button};move_time={args.move_time}"
+        f"button={args.button};move_time={args.move_time};"
+        f"bezier_ratio={args.bezier_ratio}"
         f"|0.0"
     )
 
