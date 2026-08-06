@@ -609,11 +609,13 @@ class Player:
                 if spots:
                     cx, cy = event.char
                     tx, ty = min(spots, key=lambda p: (p[0]-cx)**2 + (p[1]-cy)**2)
-                    tx += random.uniform(-3, 3)
-                    ty += random.uniform(-3, 3)
+                    tx += random.uniform(-self.position_threshold, self.position_threshold)
+                    ty += random.uniform(-self.position_threshold, self.position_threshold)
                     btn = mouse.Button.left if event.button == 'left' else mouse.Button.right
                     x0, y0 = self.mouse.position
-                    self._smooth_move(x0, y0, tx, ty, event.move_time)
+                    rand_move = random.uniform(-self.delay_threshold, self.delay_threshold)
+                    actual_move_time = max(0, event.move_time * (1 + rand_move))
+                    self._smooth_move(x0, y0, tx, ty, actual_move_time)
                     # front-load delay: let cursor settle before clicking
                     rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
                     time.sleep(max(0, event.delay * (1 + rand_delay)))
