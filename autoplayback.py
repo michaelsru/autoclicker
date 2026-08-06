@@ -77,12 +77,13 @@ class WaitPixelsEvent:
 class FindFishingSpotEvent:
     """Scans `region` for tile-colored pixels, clusters into spots,
     clicks the one closest to `char`."""
-    region: tuple  # (x1,y1,x2,y2) — full search area
-    color: tuple   # (r,g,b)        — tile marker color
-    tol: int       # per-channel tolerance
-    timeout: float # seconds to wait for a spot to appear
-    char: tuple    # (cx,cy)        — character screen pos for closest-spot selection
-    button: str    # 'left' | 'right'
+    region: tuple    # (x1,y1,x2,y2) — full search area
+    color: tuple     # (r,g,b)        — tile marker color
+    tol: int         # per-channel tolerance
+    timeout: float   # seconds to wait for a spot to appear
+    char: tuple      # (cx,cy)        — character screen pos for closest-spot selection
+    button: str      # 'left' | 'right'
+    move_time: float # seconds to glide cursor to target (0 = instant)
     delay: float
 
 # --- Exceptions ---
@@ -211,11 +212,15 @@ class Reader:
                             return re.search(rf'{name}=([\d.]+)', event_data_str).group(1)
                         def _gs(name):
                             return re.search(rf'{name}=(\w+)', event_data_str).group(1)
+                        def _gn_opt(name, default=0.0):
+                            m = re.search(rf'{name}=([\d.]+)', event_data_str)
+                            return float(m.group(1)) if m else default
                         events.append(FindFishingSpotEvent(
                             region=_g4('region'),
                             color=_g3('color'), tol=int(_gn('tol')),
                             timeout=float(_gn('timeout')),
                             char=_g2('char'), button=_gs('button'),
+                            move_time=_gn_opt('move_time', 0.0),
                             delay=delay,
                         ))
                 except Exception as e:
@@ -266,7 +271,7 @@ class Writer:
                     f"color=({co[0]},{co[1]},{co[2]});"
                     f"tol={event.tol};timeout={event.timeout};"
                     f"char=({event.char[0]},{event.char[1]});"
-                    f"button={event.button}"
+                    f"button={event.button};move_time={event.move_time}"
                     f"|{event.delay}\n"
                 )
 
@@ -572,6 +577,20 @@ class Player:
             f"at ({event.x}, {event.y}) target=({event.r},{event.g},{event.b})"
         )
 
+    def _smooth_move(self, x0, y0, x1, y1, move_time):
+        """Move mouse from (x0,y0) to (x1,y1) over move_time seconds.
+        Uses smoothstep easing. move_time=0 → instant jump."""
+        if move_time <= 0:
+            self.mouse.position = (x1, y1)
+            return
+        steps = max(10, int(move_time * 60))  # ~60fps
+        dt = move_time / steps
+        for i in range(1, steps + 1):
+            t = i / steps
+            t_e = t * t * (3 - 2 * t)  # smoothstep
+            self.mouse.position = (x0 + (x1 - x0) * t_e, y0 + (y1 - y0) * t_e)
+            time.sleep(dt)
+
     def _find_fishing_spot(self, event):
         try:
             import mss as _mss
@@ -593,7 +612,8 @@ class Player:
                     tx += random.uniform(-3, 3)
                     ty += random.uniform(-3, 3)
                     btn = mouse.Button.left if event.button == 'left' else mouse.Button.right
-                    self.mouse.position = (tx, ty)
+                    x0, y0 = self.mouse.position
+                    self._smooth_move(x0, y0, tx, ty, event.move_time)
                     # front-load delay: let cursor settle before clicking
                     rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
                     time.sleep(max(0, event.delay * (1 + rand_delay)))
