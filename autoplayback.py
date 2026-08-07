@@ -21,6 +21,16 @@ class MoveEvent:
     delay: float
 
 @dataclass(slots=True)
+class SmoothMoveEvent:
+    """Non-linear mouse glide to target coordinate with optional click and pre-click settle delay."""
+    x: float
+    y: float
+    button: str | None
+    move_time: float
+    bezier_ratio: float
+    delay: float
+
+@dataclass(slots=True)
 class ClickEvent:
     x: float
     y: float
@@ -147,12 +157,13 @@ class Reader:
             logger.warning(f"Circular reference detected for file: {filename}")
             return []
         
-        loaded_files.add(filename)
+        # Pass a copy of the stack set so sibling sub-files can be loaded sequentially
+        new_loaded = loaded_files | {filename}
         
         try:
             with open(filename, 'r') as f:
                 lines = f.readlines()
-            events, _ = self._parse_lines(lines, indent_level=0, loaded_files=loaded_files)
+            events, _ = self._parse_lines(lines, indent_level=0, loaded_files=new_loaded)
             return events
         except FileNotFoundError:
             logger.warning(f"File not found: {filename}")
@@ -284,6 +295,24 @@ class Reader:
                     if event_type == 'move':
                         nums = re.findall(r'([-+]?\d*\.?\d+)', event_data_str)
                         events.append(MoveEvent(x=float(nums[0]), y=float(nums[1]), delay=delay))
+                    elif event_type == 'smooth_move':
+                        m_pos = re.search(r'\(?\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*\)?', event_data_str)
+                        x_val = float(m_pos.group(1))
+                        y_val = float(m_pos.group(2))
+                        def _gn_opt(name, default=0.0):
+                            m = re.search(rf'{name}=([\d.]+)', event_data_str)
+                            return float(m.group(1)) if m else default
+                        def _gs_opt(name):
+                            m = re.search(rf'(?:^|;){name}=(\w+)(?:;|$)', event_data_str)
+                            return m.group(1) if m else None
+
+                        events.append(SmoothMoveEvent(
+                            x=x_val, y=y_val,
+                            button=_gs_opt('button'),
+                            move_time=_gn_opt('move_time', 0.0),
+                            bezier_ratio=_gn_opt('bezier_ratio', 0.7),
+                            delay=delay,
+                        ))
                     elif event_type in ('set_timer', 'reset_timer'):
                         events.append(SetTimerEvent(name=event_data_str.strip(' ()'), delay=delay))
                     elif event_type == 'click':
@@ -298,14 +327,22 @@ class Reader:
                     elif event_type == 'spacebar':
                         events.append(SpacebarEvent(pressed=event_data_str.strip() == 'True', delay=delay))
                     elif event_type == 'wait_pixel':
-                        nums = list(map(float, re.findall(r'([-+]?\d*\.?\d+)', event_data_str)))
-                        # format: (x, y, r, g, b, tolerance, timeout)
-                        events.append(WaitPixelEvent(
-                            x=int(nums[0]), y=int(nums[1]),
-                            r=int(nums[2]), g=int(nums[3]), b=int(nums[4]),
-                            tolerance=int(nums[5]), timeout=float(nums[6]),
-                            delay=delay,
-                        ))
+                        match = re.match(r"\(([-+]?\d*\.\d+|\d+), ([-+]?\d*\.\d+|\d+), ([-+]?\d*\.\d+|\d+), ([-+]?\d*\.\d+|\d+), ([-+]?\d*\.\d+|\d+), ([-+]?\d*\.\d+|\d+), ([-+]?\d*\.\d+|\d+)\)", event_data_str)
+                        if match:
+                            events.append(WaitPixelEvent(
+                                x=int(match.group(1)), y=int(match.group(2)),
+                                r=int(match.group(3)), g=int(match.group(4)), b=int(match.group(5)),
+                                tolerance=int(match.group(6)), timeout=float(match.group(7)),
+                                delay=delay
+                            ))
+                    elif event_type == 'wait_pixels':
+                        raw_pixels = re.findall(r'\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', event_data_str)
+                        px_tuples = tuple((int(p[0]), int(p[1]), int(p[2]), int(p[3]), int(p[4]), int(p[5])) for p in raw_pixels)
+                        m_mode = re.search(r'mode=(\w+)', event_data_str)
+                        mode_val = m_mode.group(1) if m_mode else 'and'
+                        m_tout = re.search(r'timeout=([\d.]+)', event_data_str)
+                        tout_val = float(m_tout.group(1)) if m_tout else 10.0
+                        events.append(WaitPixelsEvent(pixels=px_tuples, mode=mode_val, timeout=tout_val, delay=delay))
                     elif event_type == 'log':
                         events.append(LogEvent(message=event_data_str.strip(), delay=delay))
                     elif event_type == 'random_wait':
@@ -389,7 +426,13 @@ class Writer:
                 self._write_events(f, event.events, indent_level + 1)
                 f.write(f"{indent}}}\n")
             elif isinstance(event, MoveEvent):
-                f.write(f"move|({event.x}, {event.y})|{event.delay}\n")
+                f.write(f"{indent}move|({event.x}, {event.y})|{event.delay}\n")
+            elif isinstance(event, SmoothMoveEvent):
+                f.write(
+                    f"{indent}smooth_move|({event.x}, {event.y});"
+                    + (f"button={event.button};" if event.button else "")
+                    + f"move_time={event.move_time};bezier_ratio={event.bezier_ratio}|{event.delay}\n"
+                )
             elif isinstance(event, ClickEvent):
                 btn_repr = f"<Button.{event.button.name}: ((0,0,0),0)>"
                 f.write(f"click|({event.x}, {event.y}, {btn_repr}, {event.pressed})|{event.delay}\n")
@@ -399,9 +442,12 @@ class Writer:
                 f.write(f"spacebar|{event.pressed}|{event.delay}\n")
             elif isinstance(event, WaitPixelEvent):
                 f.write(
-                    f"wait_pixel|({event.x}, {event.y}, {event.r}, {event.g}, {event.b}, "
+                    f"{indent}wait_pixel|({event.x}, {event.y}, {event.r}, {event.g}, {event.b}, "
                     f"{event.tolerance}, {event.timeout})|{event.delay}\n"
                 )
+            elif isinstance(event, WaitPixelsEvent):
+                px_str = ",".join(f"({p[0]},{p[1]},{p[2]},{p[3]},{p[4]},{p[5]})" for p in event.pixels)
+                f.write(f"{indent}wait_pixels|({px_str});mode={event.mode};timeout={event.timeout}|{event.delay}\n")
             elif isinstance(event, LogEvent):
                 f.write(f"log|{event.message}|{event.delay}\n")
             elif isinstance(event, FindFishingSpotEvent):
@@ -435,6 +481,13 @@ class Editor:
             elif isinstance(event, FindFishingSpotEvent):
                 event.delay *= scale_factor
                 event.move_time *= scale_factor
+            elif isinstance(event, SmoothMoveEvent):
+                event.delay *= scale_factor
+                event.move_time *= scale_factor
+            elif isinstance(event, RandomWaitEvent):
+                event.delay *= scale_factor
+                event.min_t *= scale_factor
+                event.max_t *= scale_factor
             else:
                 event.delay *= scale_factor
         return events
@@ -456,6 +509,8 @@ class Editor:
                 # inner events may or may not run; count delay + inner as best-case
                 total += event.delay + self._calculate_total_seconds(event.events)
             elif isinstance(event, FindFishingSpotEvent):
+                total += event.delay + event.move_time
+            elif isinstance(event, SmoothMoveEvent):
                 total += event.delay + event.move_time
             elif isinstance(event, RandomWaitEvent):
                 total += event.delay + (event.min_t + event.max_t) / 2
@@ -573,12 +628,14 @@ class Player:
         self.verbose = verbose
         self.playing = False
         self.thread = None
+        self.max_duration = None
         self.timers = {}
 
-    def play(self, events, loop_count=1, dry_run=False):
+    def play(self, events, loop_count=1, dry_run=False, max_duration=None):
         if self.playing: return
         print("Starting Playback!")
         self.playing = True
+        self.max_duration = max_duration
         self.timers = {}
         
         if dry_run:
@@ -607,6 +664,12 @@ class Player:
         total = loop_count if loop_count != -1 else None
 
         while self.playing:
+            if self.max_duration and (time.time() - self._start_time) >= self.max_duration:
+                if self.verbose:
+                    sys.stdout.write(f"\n[{_ts()}][INFO] Max duration {self.max_duration}s reached — stopping playback\n")
+                    sys.stdout.flush()
+                break
+
             if current_loop != -1:
                 if current_loop == 0:
                     break
@@ -619,6 +682,7 @@ class Player:
                 if self.verbose:
                     sys.stdout.write(f"\n[{_ts()}][TIMEOUT] {e} — restarting iteration\n")
                     sys.stdout.flush()
+                self.timers.clear()  # Fix #6: purge stale timers on pixel timeout iteration restart
                 try:
                     self._execute_recursive(events)
                 except _PixelTimeout as e2:
@@ -680,6 +744,9 @@ class Player:
 
     def _execute_recursive(self, events, level=0):
         if not self.playing: return
+        if self.max_duration and (time.time() - self._start_time) >= self.max_duration:
+            self.playing = False
+            return
         indent = '  ' * level
 
         for event in events:
@@ -725,6 +792,7 @@ class Player:
                 continue
 
             if isinstance(event, CheckPixelEvent):
+                pr, pg, pb = 0, 0, 0  # Fix #1: default fallback prevents UnboundLocalError if grab fails
                 try:
                     import mss as _mss
                     with _mss.MSS() as sct:
@@ -769,6 +837,15 @@ class Player:
                 self._wait_pixels(event)
             elif isinstance(event, FindFishingSpotEvent):
                 self._find_fishing_spot(event)
+            elif isinstance(event, SmoothMoveEvent):
+                self._execute_smooth_move_and_click(
+                    event.x, event.y,
+                    button=event.button,
+                    move_time=event.move_time,
+                    bezier_ratio=event.bezier_ratio,
+                    delay=event.delay,
+                    log_tag="MOVE",
+                )
             elif isinstance(event, RandomWaitEvent):
                 wait = random.uniform(event.min_t, event.max_t)
                 if self.verbose:
@@ -781,8 +858,8 @@ class Player:
                     sys.stdout.flush()
 
             self._event_count += 1
-            # FindFishingSpotEvent consumes its delay internally (pre-click settle)
-            if not isinstance(event, FindFishingSpotEvent):
+            # FindFishingSpotEvent and SmoothMoveEvent consume delay internally (pre-click settle)
+            if not isinstance(event, (FindFishingSpotEvent, SmoothMoveEvent)):
                 rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
                 actual_delay = max(0, event.delay * (1 + rand_delay))
                 time.sleep(actual_delay)
@@ -813,6 +890,44 @@ class Player:
             f"wait_pixel timed out after {event.timeout}s "
             f"at ({event.x}, {event.y}) target=({event.r},{event.g},{event.b})"
         )
+
+    def _wait_pixels(self, event):
+        """Wait until multiple pixel conditions (AND/OR) match within tolerance or timeout."""
+        try:
+            import mss
+        except ImportError:
+            logger.error("wait_pixels requires mss: pip install mss")
+            self.playing = False
+            return
+
+        deadline = time.time() + event.timeout
+        with mss.MSS() as sct:
+            while time.time() < deadline and self.playing:
+                results = []
+                for (px, py, pr, pg, pb, tol) in event.pixels:
+                    monitor = {"top": py, "left": px, "width": 1, "height": 1}
+                    try:
+                        shot = sct.grab(monitor)
+                        b_v, g_v, r_v = shot.raw[0], shot.raw[1], shot.raw[2]
+                        matched = (
+                            abs(r_v - pr) <= tol and
+                            abs(g_v - pg) <= tol and
+                            abs(b_v - pb) <= tol
+                        )
+                        results.append(matched)
+                    except Exception as e:
+                        logger.warning(f"wait_pixels grab error: {e}")
+                        results.append(False)
+
+                if event.mode == 'and' and all(results):
+                    return
+                elif event.mode == 'or' and any(results):
+                    return
+                time.sleep(0.05)
+
+        if not self.playing:
+            return
+        raise _PixelTimeout(f"wait_pixels: condition {event.mode!r} not met after {event.timeout}s")
 
     def _smooth_move(self, x0, y0, x1, y1, move_time, bezier_ratio=0.7):
         """Move mouse from (x0,y0) to (x1,y1) over move_time seconds.
@@ -862,6 +977,34 @@ class Player:
                 self.mouse.position = (ox + (x1 - ox)*s, oy + (y1 - oy)*s)
                 time.sleep(dt)
 
+    def _execute_smooth_move_and_click(self, target_x, target_y, button=None, move_time=0.0, bezier_ratio=0.7, delay=0.0, log_tag="MOVE", info_extra=""):
+        """Performs non-linear cursor glide to target coordinate, followed by pre-click settle delay and optional click."""
+        tx = target_x + random.uniform(-self.position_threshold, self.position_threshold)
+        ty = target_y + random.uniform(-self.position_threshold, self.position_threshold)
+        _BTN_MAP = {'left': mouse.Button.left, 'right': mouse.Button.right}
+        btn = _BTN_MAP.get(button) if button else None
+        if button and btn is None:
+            logger.warning(f"{log_tag}: unknown button={button!r}, skipping click")
+
+        x0, y0 = self.mouse.position
+        rand_move = random.uniform(-self.delay_threshold, self.delay_threshold)
+        actual_move_time = max(0, move_time * (1 + rand_move))
+        self._smooth_move(x0, y0, tx, ty, actual_move_time, bezier_ratio)
+
+        # front-load delay: let cursor settle before clicking
+        rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
+        time.sleep(max(0, delay * (1 + rand_delay)))
+
+        if btn is not None:
+            self.mouse.press(btn)
+            time.sleep(0.05)
+            self.mouse.release(btn)
+
+        if self.verbose:
+            action = f"clicked({button})" if btn is not None else "moved"
+            sys.stdout.write(f"\n[{_ts()}][{log_tag}] {action} to ({int(tx)},{int(ty)}){info_extra}\n")
+            sys.stdout.flush()
+
     def _find_fishing_spot(self, event):
         try:
             import mss as _mss
@@ -883,28 +1026,15 @@ class Player:
                         tx, ty = min(spots, key=lambda p: (p[0]-event.char[0])**2 + (p[1]-event.char[1])**2)
                     else:
                         tx, ty = random.choice(spots)
-                    tx += random.uniform(-self.position_threshold, self.position_threshold)
-                    ty += random.uniform(-self.position_threshold, self.position_threshold)
-                    # #4: explicit dict lookup — typos get None + warning, not silent right-click
-                    _BTN_MAP = {'left': mouse.Button.left, 'right': mouse.Button.right}
-                    btn = _BTN_MAP.get(event.button) if event.button else None
-                    if event.button and btn is None:
-                        logger.warning(f"find_fishing_spot: unknown button={event.button!r}, skipping click")
-                    x0, y0 = self.mouse.position
-                    rand_move = random.uniform(-self.delay_threshold, self.delay_threshold)
-                    actual_move_time = max(0, event.move_time * (1 + rand_move))
-                    self._smooth_move(x0, y0, tx, ty, actual_move_time, event.bezier_ratio)
-                    # front-load delay: let cursor settle before clicking
-                    rand_delay = random.uniform(-self.delay_threshold, self.delay_threshold)
-                    time.sleep(max(0, event.delay * (1 + rand_delay)))
-                    if btn is not None:
-                        self.mouse.press(btn)
-                        time.sleep(0.05)
-                        self.mouse.release(btn)
-                    if self.verbose:
-                        action = f"clicked({event.button})" if btn is not None else "moved"
-                        sys.stdout.write(f"\n[{_ts()}][FISH] {action} to ({int(tx)},{int(ty)}), {len(spots)} spot(s) available\n")
-                        sys.stdout.flush()
+                    self._execute_smooth_move_and_click(
+                        tx, ty,
+                        button=event.button,
+                        move_time=event.move_time,
+                        bezier_ratio=event.bezier_ratio,
+                        delay=event.delay,
+                        log_tag="FISH",
+                        info_extra=f", {len(spots)} spot(s) available",
+                    )
                     return
                 time.sleep(0.2)
 
@@ -1102,13 +1232,11 @@ class AutoClickerApp:
             elif key.char in ['p', 'P'] and not self.player.playing and not self.recorder.recording:
                 loop_count = self.args.count
                 if self.args.time:
-                    loop_count = -1  # run until timer fires
-                self.player.play(self.loaded_events, loop_count=loop_count)
-                if self.args.time:
-                    secs = _parse_duration(self.args.time)
-                    print(f"Running for {self.args.time} ({secs:.0f}s)")
-                    t = threading.Thread(target=_duration_stop, args=(self.player, secs), daemon=True)
-                    t.start()
+                    loop_count = -1  # run until timer / max_duration
+                max_duration = _parse_duration(self.args.time) if self.args.time else None
+                if max_duration:
+                    print(f"Running for {self.args.time} ({max_duration:.0f}s)")
+                self.player.play(self.loaded_events, loop_count=loop_count, max_duration=max_duration)
             
             elif key.char in ['e', 'E'] and self.player.playing:
                 self.player.stop()
